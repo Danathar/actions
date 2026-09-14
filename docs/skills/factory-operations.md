@@ -278,6 +278,10 @@ gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state --jq .state
 
 The repository has `allow_auto_merge: true` enabled. Without this, GitHub ignores the `automerge` setting regardless of config.
 
+### Automated wiring assertion
+
+`.github/workflows/renovate-automerge-wiring.yml` runs `scripts/renovate-automerge-wiring-check.sh` on a daily schedule (and via `workflow_dispatch`). It asserts the declarative facts that make a real mergeraptor PR mergeable — `allow_auto_merge` is true, and the MergeRaptor app is the **sole** review-bypass actor on `main` — and reports any live mergeraptor/renovate PR with auto-merge enabled. The end-to-end merge itself needs a real mergeraptor PR (created out-of-band by Renovate) and cannot be forced from CI, so this check is the part of issue #403 that is automatable: it fails loudly if the wiring drifts, and its passing is the precondition evidence that the merge step in `renovate-automerge.yml` can land a qualifying PR. Covered by `tests/bats/test_renovate_automerge_wiring_check.bats`.
+
 ### Relationship to `@v1`
 
 Renovate keeps SHA pins current **for third-party actions in this repo**. Consumers don’t see the updates until a maintainer advances the `@v1` tag. See the `@v1` runbook in AGENTS.md for the exact commands.
