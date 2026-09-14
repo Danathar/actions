@@ -48,6 +48,7 @@ Coverage gate: `--cov-fail-under=75`
 | `sign-and-publish` keyless/key validation + SBOM attach/cache/path guards | `tests/bats/test_sign_and_publish.bats` (19 tests) |
 | `setup-runner` native-overlay setup | `tests/bats/test_setup_runner.bats` (9 tests) |
 | `reusable-renovate-automerge.yml` check-rollup classification | `tests/bats/test_renovate_automerge_checks.bats` (8 tests) |
+| `reusable-renovate-automerge.yml` PR-lookup / qualification matcher | `tests/bats/test_renovate_automerge_find_pr.bats` (10 tests) |
 
 The Node suite runs in the `node` job in `unit-tests.yml`:
 
