@@ -10,6 +10,10 @@ on:
       - ".github/actions/**"
       - "tests/**"
       - ".github/workflows/reusable-build.yml"
+      - ".github/workflows/reusable-execute-release.yml"
+      - ".github/workflows/reusable-promote-squash.yml"
+      - ".github/workflows/reusable-release-gate.yml"
+      - ".github/workflows/reusable-release.yml"
       - ".github/workflows/reusable-renovate.yml"
       - ".github/workflows/unit-tests.yml"
   pull_request:
@@ -20,6 +24,10 @@ on:
       - ".github/actions/**"
       - "tests/**"
       - ".github/workflows/reusable-build.yml"
+      - ".github/workflows/reusable-execute-release.yml"
+      - ".github/workflows/reusable-promote-squash.yml"
+      - ".github/workflows/reusable-release-gate.yml"
+      - ".github/workflows/reusable-release.yml"
       - ".github/workflows/reusable-renovate.yml"
       - ".github/workflows/unit-tests.yml"
 
