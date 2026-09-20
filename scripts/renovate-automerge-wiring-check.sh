@@ -5,9 +5,19 @@
 # reports the live state that would trigger an end-to-end merge. Exits non-zero
 # on any failed assertion so a scheduled run fails loudly when the wiring drifts.
 #
+# `allow_auto_merge` (on the repo) and `bypass_actors` (on a branch ruleset) are
+# both omitted entirely from the GitHub API response — not returned as `false`
+# or `[]` — for a caller without push/administration access to the repo
+# (projectbluefin/actions#514). A `GH_TOKEN` without that access therefore looks
+# identical, at the JSON level, to a repo with both settings genuinely off. This
+# script tells the two apart and reports the permission case as a distinct,
+# non-misleading failure instead of asserting the setting is disabled.
+#
 # Env:
 #   OWNER / REPO - target repo (default projectbluefin/actions)
-#   GH_TOKEN     - token with repo read (github.token in CI)
+#   GH_TOKEN     - token with push/administration access to $OWNER/$REPO, so
+#                  the fields above are actually returned (a MergeRaptor app
+#                  token in CI; github.token does not qualify)
 #
 # gh is invoked as a command so it can be mocked in tests.
 
@@ -22,12 +32,19 @@ note() { printf '%s\n' "$*"; }
 fail_assert() { echo "FAIL: $*"; fail=1; }
 
 # 1. The repo must allow auto-merge. Without this, GitHub ignores the
-#    renovate `automerge` setting regardless of config.
+#    renovate `automerge` setting regardless of config. GitHub omits
+#    `allow_auto_merge` from the response (JSON null) rather than reporting
+#    `false` when the token lacks push access — treat that as unreadable, not
+#    as evidence the setting is off.
 note "== allow_auto_merge =="
-allow_auto_merge=$(gh api "repos/$REPO_REF" --jq '.allow_auto_merge // false')
-note "allow_auto_merge = $allow_auto_merge"
-[ "$allow_auto_merge" = "true" ] || \
-  fail_assert "repo allow_auto_merge is not true; GitHub ignores automerge regardless of config"
+allow_auto_merge=$(gh api "repos/$REPO_REF" --jq '.allow_auto_merge')
+if [ "$allow_auto_merge" = "null" ]; then
+  fail_assert "repo allow_auto_merge is unreadable (field omitted by the API) — GH_TOKEN lacks push/administration access to $REPO_REF; cannot confirm auto-merge is enabled"
+else
+  note "allow_auto_merge = $allow_auto_merge"
+  [ "$allow_auto_merge" = "true" ] || \
+    fail_assert "repo allow_auto_merge is not true; GitHub ignores automerge regardless of config"
+fi
 
 # 2. The MergeRaptor app must be the SOLE review-bypass actor on main. The
 #    minted app token can only bypass the required review if this app is in the
@@ -50,21 +67,32 @@ elif jq -e 'type == "array"' <<<"$ruleset_resp" >/dev/null 2>&1; then
   done
 fi
 
+bypass_readable=1
 if [ -z "$main_ruleset" ] || [ "$main_ruleset" = "null" ]; then
   fail_assert "no branch ruleset enforces main"
   bypass='[]'
+  bypass_readable=0
+elif jq -e 'has("bypass_actors")' <<<"$main_ruleset" >/dev/null 2>&1; then
+  bypass=$(echo "$main_ruleset" | jq -c '.bypass_actors')
 else
-  bypass=$(echo "$main_ruleset" | jq -c '.bypass_actors // []')
+  # GitHub omits `bypass_actors` from the ruleset response entirely (rather
+  # than an empty array) when the token lacks administration access — treat
+  # that as unreadable, not as evidence there is no bypass actor.
+  fail_assert "main branch ruleset bypass_actors is unreadable (field omitted by the API) — GH_TOKEN lacks administration access to $REPO_REF; cannot confirm the MergeRaptor bypass allowance"
+  bypass='[]'
+  bypass_readable=0
 fi
 note "bypass_actors = $bypass"
-n_mergeraptor=$(echo "$bypass" \
-  | jq '[.[] | select((.actor_type == "app" or .actor_type == "Integration") and (((.actor_name // "") | ascii_downcase) == "mergeraptor" or .actor_id == 3069633))] | length')
-n_other=$(echo "$bypass" \
-  | jq '[.[] | select(.actor_type != "OrganizationAdmin") | select((.actor_type != "app" and .actor_type != "Integration") or ((((.actor_name // "") | ascii_downcase) != "mergeraptor") and .actor_id != 3069633))] | length')
-[ "$n_mergeraptor" -eq 1 ] || \
-  fail_assert "mergeraptor app is not exactly one bypass actor on main"
-[ "$n_other" -eq 0 ] || \
-  fail_assert "non-mergeraptor bypass actor(s) present on main: $bypass"
+if [ "$bypass_readable" -eq 1 ]; then
+  n_mergeraptor=$(echo "$bypass" \
+    | jq '[.[] | select((.actor_type == "app" or .actor_type == "Integration") and (((.actor_name // "") | ascii_downcase) == "mergeraptor" or .actor_id == 3069633))] | length')
+  n_other=$(echo "$bypass" \
+    | jq '[.[] | select(.actor_type != "OrganizationAdmin") | select((.actor_type != "app" and .actor_type != "Integration") or ((((.actor_name // "") | ascii_downcase) != "mergeraptor") and .actor_id != 3069633))] | length')
+  [ "$n_mergeraptor" -eq 1 ] || \
+    fail_assert "mergeraptor app is not exactly one bypass actor on main"
+  [ "$n_other" -eq 0 ] || \
+    fail_assert "non-mergeraptor bypass actor(s) present on main: $bypass"
+fi
 
 # 3. Informational: live mergeraptor/renovate PRs with auto-merge enabled. These
 #    are exactly the PRs the auto-merge workflow (renovate-automerge.yml) would

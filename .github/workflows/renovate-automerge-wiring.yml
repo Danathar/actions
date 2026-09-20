@@ -1,5 +1,5 @@
 # Scheduled wiring assertion for the Renovate/MergeRaptor auto-merge path
-# (projectbluefin/actions#403).
+# (projectbluefin/actions#403, projectbluefin/actions#514).
 #
 # The end-to-end merge needs a real mergeraptor PR with autoMergeRequest !=
 # null, created out-of-band by Renovate and impossible to force from CI. But the
@@ -8,6 +8,20 @@
 # actor on main (so the minted app token can actually bypass the required review).
 # When a qualifying PR lands, this check passing is the precondition evidence
 # that the merge step in renovate-automerge.yml can run.
+#
+# `repos/{owner}/{repo}.allow_auto_merge` and a branch ruleset's `bypass_actors`
+# are only returned by the API to a caller with push/administration access to
+# the repo (GitHub silently omits the field otherwise — it does not report
+# `false`/`[]`). The default `github.token` on a schedule/workflow_dispatch run
+# has no such access regardless of the `permissions:` block below, so this job
+# mints a MergeRaptor app token instead. Note: being a branch-ruleset bypass
+# actor is a ruleset setting, not an app installation permission — it does not
+# by itself grant this token Administration:read. If the MergeRaptor GitHub
+# App installation lacks that permission, both fields stay unreadable even
+# with this token; the script (renovate-automerge-wiring-check.sh) reports
+# that case as an explicit "... is unreadable" failure rather than a false
+# "setting is disabled" negative, so it's still safe to ship without first
+# confirming the installation's permission set. See projectbluefin/actions#514.
 
 name: Renovate Auto-merge Wiring Check
 
@@ -28,9 +42,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ secrets.MERGERAPTOR_APP_ID }}
+          private-key: ${{ secrets.MERGERAPTOR_PRIVATE_KEY }}
+          owner: projectbluefin
+          repositories: actions
+
       - name: Verify auto-merge wiring
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           OWNER: projectbluefin
           REPO: actions
         run: scripts/renovate-automerge-wiring-check.sh

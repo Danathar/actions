@@ -284,6 +284,8 @@ The repository has `allow_auto_merge: true` enabled. Without this, GitHub ignore
 
 `.github/workflows/renovate-automerge-wiring.yml` runs `scripts/renovate-automerge-wiring-check.sh` on a daily schedule (and via `workflow_dispatch`). It asserts the declarative facts that make a real mergeraptor PR mergeable — `allow_auto_merge` is true, and the MergeRaptor app is the **sole** review-bypass actor on `main` — and reports any live mergeraptor/renovate PR with auto-merge enabled. The end-to-end merge itself needs a real mergeraptor PR (created out-of-band by Renovate) and cannot be forced from CI, so this check is the part of issue #403 that is automatable: it fails loudly if the wiring drifts, and its passing is the precondition evidence that the merge step in `renovate-automerge.yml` can land a qualifying PR. Covered by `tests/bats/test_renovate_automerge_wiring_check.bats`.
 
+**Gotcha — `allow_auto_merge` and a ruleset's `bypass_actors` are omitted (JSON `null`/missing key), not reported `false`/`[]`, for a caller without push/administration access to the repo** (projectbluefin/actions#514). The default `github.token` on a schedule/`workflow_dispatch` run never has that access, so the job mints a MergeRaptor app token (`create-github-app-token` with `MERGERAPTOR_APP_ID`/`MERGERAPTOR_PRIVATE_KEY`) and uses it as `GH_TOKEN` for the check — the same credential already trusted for the bypass path itself. The script additionally tells "field omitted because the token can't see it" apart from "field present and false/empty": it reports the former as `FAIL: … is unreadable` rather than misreporting the repo setting as disabled.
+
 ### Relationship to `@v1`
 
 Renovate keeps SHA pins current **for third-party actions in this repo**. Consumers don’t see the updates until a maintainer advances the `@v1` tag. See the `@v1` runbook in AGENTS.md for the exact commands.
@@ -296,6 +298,7 @@ Renovate keeps SHA pins current **for third-party actions in this repo**. Consum
 | Renovate PR sits green and unmerged | `autoMergeRequest` is null — `renovate.json` doesn't mark this update type auto-mergeable (e.g. a major bump) | Expected. Review and merge by hand, or widen the `packageRules` automerge match |
 | Auto-merge job logs "No qualifying Renovate/Mergeraptor PR" on a real Renovate PR | Author matcher missed a login spelling, or the PR is a draft/conflicting | Compare against the live GraphQL `author.login` — GraphQL says `mergeraptor`, REST says `app/mergeraptor` |
 | Auto-merge job reaches the merge step and `gh pr merge` fails on review requirements | MergeRaptor missing from `bypass_pull_request_allowances`, or the job used `github.token` instead of the app token | Check the bypass list; confirm the caller passes `app_id` + `private_key` |
+| Wiring check FAILs with `… is unreadable (field omitted by the API)` | `GH_TOKEN` lacks push/administration access to the repo — the API silently omits `allow_auto_merge`/`bypass_actors` rather than returning `false`/`[]` | Confirm `MERGERAPTOR_APP_ID`/`MERGERAPTOR_PRIVATE_KEY` are set and the app token step ran; this is not evidence the repo setting is actually disabled |
 | Renovate PR consumer-validation fails | Bot exemption not firing | Verify author login ends in `[bot]` or starts with `app/` - check `gh pr view NNN --json author` |
 | Renovate PR has merge conflict | Another bump landed first; branches diverged | Locally checkout the branch, `git rebase origin/main`, force-push |
 | Two Renovate PRs update the same action | Both opened before either merged | Close the older/lower version one; merge the newer |
@@ -315,6 +318,10 @@ leaves the system inert but looking correct. Check all five:
       without them the job runs as `github-actions[bot]`, which has no bypass and
       cannot merge.
 - [ ] `gh api repos/projectbluefin/actions --jq .allow_auto_merge` returns `true`.
+      Run this with a token that has push/admin access to the repo — GitHub
+      returns `null` (not `false`) for a lower-privileged token, which looks
+      identical to the setting being off and is exactly the trap that produced
+      issue #514.
 - [ ] A recent run of the "Renovate Auto-merge" workflow exists and its log ends in
       either a merge or an explicit skip reason — a workflow that never triggers is
       the failure mode this checklist exists to catch:
