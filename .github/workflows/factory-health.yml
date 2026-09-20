@@ -7,6 +7,7 @@ on:
 
 permissions:
   actions: read
+  contents: read
   issues: write
 
 concurrency:
@@ -18,6 +19,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Generate common issue token
         id: app-token
         continue-on-error: true
@@ -196,6 +200,62 @@ jobs:
             --limit 100 \
             --json number,title,url)
 
+          # Close alerts whose pipeline is healthy again. The dedupe check in
+          # the breach loop below matches on the issue title prefix, so a stale
+          # open alert silently mutes every later breach of that same
+          # repo+pipeline. Nothing closed these issues before, and
+          # projectbluefin/actions#490 is the proof: dakota Promote recovered to
+          # 100% on the rerun and its alert stayed open, muting that pipeline
+          # indefinitely. Closing is best-effort — a single issue that cannot be
+          # closed must not stop the alerting pass that follows.
+          printf '%s' "${results}" > "${RUNNER_TEMP}/factory-health-results.json"
+          printf '%s' "${open_issues_json}" > "${RUNNER_TEMP}/factory-health-open-issues.json"
+
+          recovered_json=$(python3 scripts/factory_health_resolve.py \
+            --results "${RUNNER_TEMP}/factory-health-results.json" \
+            --open-issues "${RUNNER_TEMP}/factory-health-open-issues.json")
+
+          issues_closed=0
+          while IFS= read -r recovered; do
+            [[ -n "${recovered}" ]] || continue
+
+            number=$(jq -r '.number' <<<"${recovered}")
+            repo=$(jq -r '.repo' <<<"${recovered}")
+            pipeline=$(jq -r '.pipeline' <<<"${recovered}")
+            workflow=$(jq -r '.workflow' <<<"${recovered}")
+            rate_display=$(jq -r '.rate_display' <<<"${recovered}")
+            success=$(jq -r '.success' <<<"${recovered}")
+            total=$(jq -r '.total' <<<"${recovered}")
+
+            recovery_body=$(cat <<EOF
+          ## Factory success rate recovered
+
+          \`${workflow}\` (${repo} / ${pipeline}) is back above the ${THRESHOLD}% threshold: **${rate_display}** (${success}/${total}) over the last ${WINDOW_HOURS} hours.
+
+          Closing automatically so this pipeline can alert again — an open alert suppresses new ones for the same repo and pipeline.
+
+          Closed automatically by \`.github/workflows/factory-health.yml\`.
+          EOF
+            )
+
+            if ! GH_TOKEN="${ISSUE_TOKEN}" gh issue comment "${number}" \
+              --repo "${ISSUE_REPO}" \
+              --body "${recovery_body}"; then
+              echo "::warning::Could not comment on recovered alert ${ISSUE_REPO}#${number}; leaving it open."
+              continue
+            fi
+
+            if ! GH_TOKEN="${ISSUE_TOKEN}" gh issue close "${number}" \
+              --repo "${ISSUE_REPO}" \
+              --reason completed; then
+              echo "::warning::Could not close recovered alert ${ISSUE_REPO}#${number}."
+              continue
+            fi
+
+            echo "Closed recovered alert #${number} (${repo} ${pipeline}: ${rate_display})."
+            issues_closed=$((issues_closed + 1))
+          done < <(jq -c '.[]' <<<"${recovered_json}")
+
           existing_labels=$(GH_TOKEN="${ISSUE_TOKEN}" gh label list \
             --repo "${ISSUE_REPO}" \
             --limit 200 \
@@ -268,4 +328,4 @@ jobs:
             issues_opened=$((issues_opened + 1))
           done < <(jq -c '.[] | select(.rate_value >= 0 and .rate_value < 80)' <<<"${results}")
 
-          echo "Opened ${issues_opened} issue(s)."
+          echo "Opened ${issues_opened} issue(s); closed ${issues_closed} recovered issue(s)."

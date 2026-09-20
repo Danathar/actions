@@ -185,6 +185,29 @@ Rules:
 - Emit that warning on **stderr**. `monitor_pipeline()` writes its result JSON to stdout and the
   caller captures it; a workflow command on stdout would corrupt the captured JSON. The runner
   parses `::warning::` from both streams, so `>&2` costs nothing.
+### Alert lifecycle - alerts must close themselves
+
+Deduplication and closing are two halves of one mechanism. The dedupe check matches an open
+issue by its title prefix (`fix(factory): [<repo>] [<pipeline>] success rate dropped`) and
+skips opening a new one, so **an alert that is never closed permanently mutes its pipeline** -
+every later breach of that repo + pipeline hits the dedupe branch and is dropped silently.
+
+Each run therefore closes before it opens: `scripts/factory_health_resolve.py` maps the health
+results onto the open issue list and returns the alerts whose pipeline is healthy again. The
+workflow comments the recovered rate on each one and closes it with reason `completed`.
+
+Rules that keep the pass safe:
+
+- Only `healthy` recovers an alert. `no-runs` is an absence of evidence, not a fix - a pipeline
+  with no completed runs in the window keeps its alert open until a real run proves otherwise.
+- `alert_title_prefix()` in the script must stay byte-identical to `title_prefix` in the
+  workflow; `tests/test_factory_health_resolve.py` asserts that by parsing the workflow. Change
+  the alert title format in one place only if you change it in both.
+- Every open alert matching the prefix is closed, not just the first, so duplicates from earlier
+  breaches do not linger.
+
+Because the workflow now runs a repository script, the job checks out the repo and needs
+`contents: read` in addition to `actions: read` and `issues: write`.
 
 ### Authentication pattern
 
@@ -665,6 +688,8 @@ Do not use this skill to:
 - A `gh run list` in the health monitor bounded only by `--limit`, with the time window applied
   afterwards in `jq` — the sample then depends on run volume, not on the window, and truncation
   is silent.
+- Factory alert issues open for a pipeline that has been green for days — the pipeline is muted,
+  not healthy-and-noisy.
 
 ## Verification
 
@@ -672,6 +697,8 @@ Do not use this skill to:
 - [ ] Weekly promotion workflows specify `environment: production`.
 - [ ] Merge queue configuration matches each repository's promotion contract (`use_merge_queue`).
 - [ ] Factory health monitor scheduled runs complete and create alert issues when failure thresholds are crossed.
+- [ ] Factory health monitor closes an alert issue once its pipeline is back above the threshold, so the
+      dedupe check cannot mute that pipeline.
 - [ ] Renovate auto-merge workflow runs with valid GitHub App authentication and branch protection bypasses.
 - [ ] Factory health `gh run list` calls pass `--created ">=${CUTOFF_ISO}"` and warn when the
       `RUN_FETCH_LIMIT` cap saturates (`tests/test_factory_health_fetch.py`).
