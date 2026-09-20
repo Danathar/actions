@@ -19,6 +19,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
+      - name: Checkout actions repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Generate app token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
@@ -48,13 +51,17 @@ jobs:
 
           for repo in "${CONSUMER_REPOS[@]}"; do
             short="${repo#projectbluefin/}"
-            mkdir -p "/tmp/workflows/${short}"
+            # Nested under .github/workflows so scripts/validate_thin_caller.py
+            # (which expects <root>/.github/workflows) can run directly
+            # against each consumer's fetched snapshot (Check 4).
+            dest="/tmp/workflows/${short}/.github/workflows"
+            mkdir -p "${dest}"
             gh api "repos/${repo}/contents/.github/workflows" \
               --jq '.[].name' 2>/dev/null \
             | while read -r wf; do
                 gh api "repos/${repo}/contents/.github/workflows/${wf}" \
                   --jq '.content' 2>/dev/null \
-                | base64 -d > "/tmp/workflows/${short}/${wf}" 2>/dev/null || true
+                | base64 -d > "${dest}/${wf}" 2>/dev/null || true
               done
           done
 
@@ -121,15 +128,31 @@ jobs:
             fi
           done
 
-          # ── Check 4: promote-testing-to-main LoC threshold ───────────────────
+          # ── Check 4: thin-caller size gate backstop (issue #546) ─────────────
+          # Runs the same canonical scripts/validate_thin_caller.py the
+          # opt-in reusable-thin-caller-gate.yml uses, against each
+          # consumer's fetched workflow snapshot, so the weekly backstop
+          # agrees with the pre-merge gate on what counts as a violation.
+          # Previously hardcoded to promote-testing-to-main.yml and counted
+          # raw `wc -l` (physical lines): once that workflow was extracted
+          # to ~41 effective lines it still tripped this check at 54
+          # physical lines (blank/comment lines included), a false positive,
+          # while any other oversized caller went undetected entirely.
           for repo in "${CONSUMER_REPOS[@]}"; do
             short="${repo#projectbluefin/}"
-            promote_wf="/tmp/workflows/${short}/promote-testing-to-main.yml"
-            if [[ -f "${promote_wf}" ]]; then
-              loc=$(wc -l < "${promote_wf}")
-              if [[ "${loc}" -gt 50 ]]; then
-                drift_items+=("${repo}|promote-loc-drift|promote-testing-to-main.yml is ${loc} lines (threshold: 50) — candidate for reusable extraction")
-              fi
+            consumer_root="/tmp/workflows/${short}"
+            violations=$(
+              python3 scripts/validate_thin_caller.py --root "${consumer_root}" --max-lines 50 2>&1 \
+                | grep '^  - ' \
+              || true
+            )
+            if [[ -n "${violations}" ]]; then
+              detail=$(
+                echo "${violations}" \
+                | sed -e 's/^  - //' -e "s#${consumer_root}/.github/workflows/##" \
+                | tr '\n' ';' | sed 's/;$//' | sed 's/;/; /g'
+              )
+              drift_items+=("${repo}|thin-caller-loc-drift|Thin-caller size gate violations: ${detail}")
             fi
           done
 

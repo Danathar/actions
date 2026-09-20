@@ -86,7 +86,10 @@ jobs:
 ```
 
 The weekly drift check remains the backstop for repos that have not adopted
-the reusable yet.
+the reusable yet. `factory-drift.yml`'s Check 4 runs this same canonical
+`validate_thin_caller.py` against every fetched consumer workflow snapshot
+(not just one hardcoded filename with a raw `wc -l` count), so the backstop
+and the pre-merge gate agree on what counts as a violation.
 
 ## Common Rationalizations
 
@@ -117,8 +120,11 @@ the reusable yet.
 ## Verification
 
 - `python3 scripts/validate_thin_caller.py --max-lines 50 --root .` exits 0.
-- `pytest tests/` passes; the reusable's structure and job-level opt-in
-  example are covered by `tests/test_reusable_thin_caller_gate.py`, and the
-  comment-skip / composite-action-exclusion cases are covered by
-  `tests/test_validate_thin_caller.py`.
+- `pytest tests/` passes; the reusable's structure, job-level opt-in example,
+  and configurable script source are covered by
+  `tests/test_reusable_thin_caller_gate.py`; the comment-skip /
+  composite-action-exclusion cases are covered by
+  `tests/test_validate_thin_caller.py`; and the `factory-drift.yml` Check 4
+  backstop (effective-line counting, not raw `wc -l`) is covered by
+  `tests/test_factory_drift_thin_caller_check.py`.
 - `.github/workflows/actionlint.yml` lints the reusable workflow on every PR.
