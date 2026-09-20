@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-Check workflows that act as thin-callers: any workflow file that references
-reusable workflows in projectbluefin/actions should be "thin" (short).
+Check workflows that act as thin-callers: any workflow file that delegates to
+a reusable workflow in projectbluefin/actions should be "thin" (short).
 
 This script searches the repository for YAML files under .github/workflows,
-finds those that contain a `uses:` referencing `projectbluefin/actions`, and
-ensures their non-empty, non-comment line count is <= max_lines.
+finds those with an active `uses:` referencing a
+`projectbluefin/actions/.github/workflows/*` reusable, and ensures their
+non-empty, non-comment line count is <= max_lines. Composite-action
+references (`projectbluefin/actions/bootc-build/*`) are not in scope; see
+`file_uses_projectbluefin` for why.
 
 Exit 0 on success, non-zero (1) on violation.
 """
@@ -32,10 +35,23 @@ def count_effective_lines(path):
 
 
 def file_uses_projectbluefin(path):
-    """Return True if file contains a uses: reference to projectbluefin/actions."""
-    pattern = re.compile(r"uses:\s*projectbluefin/actions(?:/|@|$)")
+    """Return True if file has an active (non-comment) uses: reference to a
+    projectbluefin/actions *reusable workflow* (`.github/workflows/*.yml`).
+
+    Composite-action references (e.g. `projectbluefin/actions/bootc-build/foo@v1`)
+    are deliberately excluded: a caller workflow that orchestrates composite
+    actions as steps alongside other logic is not the "thin pointer to a
+    reusable" pattern #411 targets, and consumer repos such as bluefin have
+    long-lived, legitimately-sized workflows built that way (issue #546).
+
+    Commented-out `uses:` lines (documentation examples, pinned-ref samples in
+    skill docs copied verbatim into a workflow header) are not callers either.
+    """
+    pattern = re.compile(r"uses:\s*projectbluefin/actions/\.github/workflows/")
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
+            if line.lstrip().startswith("#"):
+                continue
             if pattern.search(line):
                 return True
     return False
