@@ -117,8 +117,15 @@ Two details in the fetch step exist to make that true, and should not be
   redirect creates the file before `gh api` runs, so a failure leaves a
   0-byte stub, and a stub counts as a fetched workflow to any later `find`.
   That is how a snapshot missing the one oversized caller would read as
-  compliant. Check 4 additionally counts only non-empty files (`-size +0`)
-  and compares the total against the advertised count.
+  compliant. Check 4 then counts **every** file that is present — including a
+  legitimately empty one — and compares the total against the advertised
+  count. Do not add a `-size +0` filter here: an empty workflow file that
+  fetched successfully is advertised *and* present, so excluding it would make
+  advertised > landed forever and raise a `thin-caller-snapshot-incomplete`
+  item that can never be cleared. The stub removal above, not a size filter,
+  is what keeps a failed fetch visible
+  (`tests/test_factory_drift_thin_caller_check.py`,
+  `test_failed_fetch_stub_is_removed_and_empty_files_still_count`).
 
 ## Common Rationalizations
 
