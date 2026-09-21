@@ -11,12 +11,14 @@ caught, composite-action-only callers are not, and a workflow that is over
 what tripped the old `wc -l` check on bluefin's `promote-testing-to-main.yml`
 after it was extracted to a reusable -- does not false-positive.
 """
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
 VALIDATOR = REPO_ROOT / "scripts" / "validate_thin_caller.py"
+FACTORY_DRIFT = REPO_ROOT / ".github" / "workflows" / "factory-drift.yml"
 
 
 def _run_validator(consumer_root):
@@ -71,3 +73,49 @@ def test_check4_no_false_positive_on_comment_heavy_caller_under_threshold(tmp_pa
     result = _run_validator(tmp_path)
     assert result.returncode == 0
     assert "promote-testing-to-main.yml" not in result.stdout
+
+
+def test_empty_snapshot_exits_zero_so_the_workflow_must_detect_it_itself(tmp_path):
+    """A failed consumer fetch is indistinguishable from a clean repo by exit code.
+
+    The fetch loop `mkdir -p`s `<root>/.github/workflows` before the `gh api`
+    calls, so a rate-limited or errored fetch leaves an existing but empty
+    directory. The validator reports "nothing to check" and exits 0 -- correct
+    for the validator, useless for a backstop. Check 4 must therefore count the
+    snapshot itself rather than trusting a zero exit.
+    """
+    wf_dir = tmp_path / ".github" / "workflows"
+    wf_dir.mkdir(parents=True)
+
+    result = _run_validator(tmp_path)
+    assert result.returncode == 0
+    assert "nothing to check" in result.stdout
+    assert not any(wf_dir.iterdir())
+
+
+def _check4_block():
+    text = FACTORY_DRIFT.read_text()
+    start = text.index("Check 4:")
+    end = text.index("Check 5:")
+    return text[start:end]
+
+
+def test_check4_uses_the_exit_code_not_just_grepped_stdout():
+    """Regression: the verdict is the exit status, not the presence of `  - ` lines.
+
+    Grepping stdout alone reports "no drift" for a crashed validator, since a
+    traceback contains no violation lines -- the one failure mode a backstop
+    cannot have.
+    """
+    block = _check4_block()
+    assert "gate_status=$?" in block
+    assert re.search(r"if\s+\(\(\s*gate_status\s*==\s*0\s*\)\)", block)
+    # The old form piped the validator straight into grep and dropped the status.
+    assert not re.search(r"validate_thin_caller\.py[^\n]*\n\s*\|\s*grep", block)
+
+
+def test_check4_reports_empty_snapshots_and_validator_errors_as_drift():
+    block = _check4_block()
+    assert "thin-caller-snapshot-empty" in block
+    assert "thin-caller-gate-error" in block
+    assert "snapshot_count == 0" in block

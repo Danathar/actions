@@ -91,6 +91,20 @@ the reusable yet. `factory-drift.yml`'s Check 4 runs this same canonical
 (not just one hardcoded filename with a raw `wc -l` count), so the backstop
 and the pre-merge gate agree on what counts as a violation.
 
+**A backstop must not be able to pass silently.** Check 4 keys on the
+validator's *exit code*, not on grepping its stdout for `  - ` lines, and it
+treats two non-violation outcomes as drift items in their own right:
+
+| Outcome | Drift item |
+|---|---|
+| Consumer snapshot is empty (the `gh api` fetch failed; the loop `mkdir -p`s the directory first, so the validator sees an existing but empty tree, prints "nothing to check" and exits 0) | `thin-caller-snapshot-empty` |
+| Validator exits non-zero without listing violations (traceback, bad arguments) | `thin-caller-gate-error` |
+
+Both report "this consumer was not actually checked" instead of the clean
+pass that grepping stdout would have produced. If you add a check to this
+workflow, follow the same rule: absence of a violation string is not evidence
+of compliance.
+
 ## Common Rationalizations
 
 - "It's only a few lines over." — drift is cumulative; a 55-line caller today
