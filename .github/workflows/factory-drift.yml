@@ -59,20 +59,28 @@ jobs:
 
             # Two failure modes, deliberately handled differently.
             #
-            # A failed *listing* is loud: this is a plain assignment under
-            # `set -euo pipefail`, so a non-zero `gh api` aborts the step and
-            # the job fails. Nothing downstream gets to mistake it for a
-            # clean consumer.
+            # A failed *listing* is loud but contained: it is recorded as a
+            # marker file that Check 4 turns into a drift item for THIS
+            # consumer, and the loop moves on. Aborting the whole step here
+            # would mean one consumer's transient 5xx (or a renamed repo)
+            # silently skipped Checks 1-5 for every other consumer that week,
+            # which is the silence a backstop must not have. Nothing
+            # downstream can mistake the marker for a clean consumer: Check 4
+            # reads it before it counts anything.
             #
             # A failed *per-file* fetch is the quiet one, and is what Check 4
             # has to be able to see. Record how many files were advertised so
             # Check 4 can compare that against how many actually landed.
             # Filtered to the same extensions find_workflows() scans, so the
             # expected and actual counts are measuring the same population.
-            wf_list=$(
+            if ! wf_list=$(
               gh api "repos/${repo}/contents/.github/workflows" \
                 --jq '.[].name | select(endswith(".yml") or endswith(".yaml"))'
-            )
+            ); then
+              echo "::warning::Could not list ${repo}/.github/workflows; recorded as drift for that consumer"
+              : > "/tmp/workflows/${short}/.listing-failed"
+              continue
+            fi
             if [[ -z "${wf_list}" ]]; then
               wf_names=()
             else
@@ -202,6 +210,18 @@ jobs:
             expected_count=$(
               cat "${consumer_root}/.expected-count" 2>/dev/null || echo 0
             )
+            # The fetch step could not even list this consumer's workflows.
+            # Its own drift item, checked before any count, so a listing
+            # failure never reads as "no workflows" or as a clean consumer.
+            if [[ -e "${consumer_root}/.listing-failed" ]]; then
+              drift_items+=("${repo}|thin-caller-listing-failed|Could not list this consumer's .github/workflows (API error or repository moved); the thin-caller backstop did not run against it")
+              continue
+            fi
+            # A consumer that advertises no workflow files has nothing for the
+            # thin-caller gate to check; that is not drift.
+            if (( expected_count == 0 )); then
+              continue
+            fi
             if (( snapshot_count == 0 )); then
               drift_items+=("${repo}|thin-caller-snapshot-empty|No workflow files were fetched for this consumer; the thin-caller backstop did not run against it")
               continue

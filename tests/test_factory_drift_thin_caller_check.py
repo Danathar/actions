@@ -165,23 +165,48 @@ def test_check4_reports_a_shortfall_against_the_advertised_count():
     assert re.search(r"snapshot_count\s*<\s*expected_count", block)
 
 
-def test_fetch_step_fails_loudly_on_a_failed_listing():
-    """The listing is a plain assignment under `set -e`, not a swallowed pipeline.
+def test_fetch_step_records_a_failed_listing_as_that_consumers_drift():
+    """A failed listing is loud for its consumer and contained to it.
 
     The earlier form piped `gh api ... 2>/dev/null` straight into a `while`
-    loop, so a failed listing produced an empty snapshot instead of a failed
-    step. Check 4's empty-snapshot guard documented that as its trigger; the
-    fetch step now fails on it directly, which is the louder outcome.
+    loop, so a failed listing produced an empty snapshot that read as a clean
+    consumer. The next form aborted the whole step, which skipped every check
+    for every other consumer that week. Now the listing is tested directly,
+    a failure writes a `.listing-failed` marker for that consumer and moves
+    on, and Check 4 turns the marker into a drift item before it counts
+    anything.
     """
     text = FACTORY_DRIFT.read_text()
     start = text.index("Fetch workflow files")
     block = text[start : text.index("Detect drift")]
 
-    assert re.search(r"wf_list=\$\(\s*\n\s*gh api", block), (
-        "The consumer workflow listing must be a command substitution so a "
-        "non-zero gh api aborts the step under `set -euo pipefail`."
+    assert re.search(r"if ! wf_list=\$\(\s*\n\s*gh api", block), (
+        "The consumer workflow listing must be tested directly so a non-zero "
+        "gh api is recorded for that consumer instead of aborting the step."
     )
-    # The per-file fetch must not leave a 0-byte stub behind.
+    assert ".listing-failed" in block
+    assert not re.search(r"gh api[^\n]*contents/\.github/workflows\"[^\n]*2>/dev/null", block), (
+        "A listing failure must not be swallowed into an empty snapshot."
+    )
+    check4 = _check4_block()
+    assert "thin-caller-listing-failed" in check4
+    assert check4.index(".listing-failed") < check4.index("snapshot_count == 0"), (
+        "Check 4 must read the listing-failed marker before any count, or a "
+        "listing failure reads as an empty snapshot."
+    )
+
+
+def test_check4_does_not_flag_a_consumer_that_advertises_no_workflows():
+    """Zero advertised files means nothing to gate, not a snapshot failure."""
+    check4 = _check4_block()
+    assert re.search(r"expected_count == 0", check4)
+    assert check4.index("expected_count == 0") < check4.index("snapshot_count == 0")
+
+
+def test_fetch_step_removes_a_failed_per_file_stub():
+    """The per-file fetch must not leave a 0-byte stub behind."""
+    text = FACTORY_DRIFT.read_text()
+    block = text[text.index("Fetch workflow files") : text.index("Detect drift")]
     assert "rm -f" in block
     assert not re.search(r"base64 -d >[^\n]*\|\|\s*true", block), (
         "A swallowed per-file fetch leaves a 0-byte file that counts as a "
