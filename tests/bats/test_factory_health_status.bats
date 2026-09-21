@@ -7,6 +7,15 @@
 # behavior must also update this file. scripts/monitor_pipeline.py mirrors
 # the same rules in Python; tests/test_monitor_pipeline.py covers that copy.
 #
+# Keeping the two copies in lockstep is enforced, not merely asked for:
+# tests/test_factory_health_classify_sync.py parses the workflow and fails if
+# the block between the verbatim markers below drifts from it, or if the
+# thresholds exported in setup() stop matching the workflow's. That test runs
+# under pytest, which unit-tests.yml triggers on factory-health.yml edits, so
+# a workflow-only change cannot pass green with this file left stale. The
+# markers are part of the contract — move them with the block, don't delete
+# them to make the check pass.
+#
 # Regression coverage for projectbluefin/actions#479:
 # "Nightly E2E" runs once a day, so a 24h window holds exactly one completed
 # run and the only rates it can report are 100% and 0%. One flaky night put
