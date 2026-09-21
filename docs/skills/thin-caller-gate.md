@@ -93,17 +93,32 @@ and the pre-merge gate agree on what counts as a violation.
 
 **A backstop must not be able to pass silently.** Check 4 keys on the
 validator's *exit code*, not on grepping its stdout for `  - ` lines, and it
-treats two non-violation outcomes as drift items in their own right:
+treats three non-violation outcomes as drift items in their own right:
 
 | Outcome | Drift item |
 |---|---|
-| Consumer snapshot is empty (the `gh api` fetch failed; the loop `mkdir -p`s the directory first, so the validator sees an existing but empty tree, prints "nothing to check" and exits 0) | `thin-caller-snapshot-empty` |
+| No workflow files were fetched for a consumer (the loop `mkdir -p`s the directory first, so the validator sees an existing but empty tree, prints "nothing to check" and exits 0) | `thin-caller-snapshot-empty` |
+| Fewer files landed than the consumer's directory listing advertised — a per-file fetch failed | `thin-caller-snapshot-incomplete` |
 | Validator exits non-zero without listing violations (traceback, bad arguments) | `thin-caller-gate-error` |
 
-Both report "this consumer was not actually checked" instead of the clean
-pass that grepping stdout would have produced. If you add a check to this
-workflow, follow the same rule: absence of a violation string is not evidence
-of compliance.
+All three report "this consumer was not actually checked" instead of the
+clean pass that grepping stdout would have produced. If you add a check to
+this workflow, follow the same rule: absence of a violation string is not
+evidence of compliance.
+
+Two details in the fetch step exist to make that true, and should not be
+"simplified" away:
+
+- The consumer's directory **listing** is a plain command substitution, so a
+  failed `gh api` aborts the step under `set -euo pipefail`. Piping it into a
+  `while read` loop instead would turn a failed listing into an empty
+  snapshot — quieter, and a worse outcome.
+- A failed **per-file** fetch is deleted rather than left in place. The `>`
+  redirect creates the file before `gh api` runs, so a failure leaves a
+  0-byte stub, and a stub counts as a fetched workflow to any later `find`.
+  That is how a snapshot missing the one oversized caller would read as
+  compliant. Check 4 additionally counts only non-empty files (`-size +0`)
+  and compares the total against the advertised count.
 
 ## Common Rationalizations
 

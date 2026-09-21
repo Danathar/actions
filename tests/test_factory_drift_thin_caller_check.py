@@ -76,13 +76,13 @@ def test_check4_no_false_positive_on_comment_heavy_caller_under_threshold(tmp_pa
 
 
 def test_empty_snapshot_exits_zero_so_the_workflow_must_detect_it_itself(tmp_path):
-    """A failed consumer fetch is indistinguishable from a clean repo by exit code.
+    """An unfetched consumer is indistinguishable from a clean repo by exit code.
 
     The fetch loop `mkdir -p`s `<root>/.github/workflows` before the `gh api`
-    calls, so a rate-limited or errored fetch leaves an existing but empty
-    directory. The validator reports "nothing to check" and exits 0 -- correct
-    for the validator, useless for a backstop. Check 4 must therefore count the
-    snapshot itself rather than trusting a zero exit.
+    calls, so an empty directory is a reachable state. The validator reports
+    "nothing to check" and exits 0 -- correct for the validator, useless for a
+    backstop. Check 4 must therefore count the snapshot itself rather than
+    trusting a zero exit.
     """
     wf_dir = tmp_path / ".github" / "workflows"
     wf_dir.mkdir(parents=True)
@@ -91,6 +91,25 @@ def test_empty_snapshot_exits_zero_so_the_workflow_must_detect_it_itself(tmp_pat
     assert result.returncode == 0
     assert "nothing to check" in result.stdout
     assert not any(wf_dir.iterdir())
+
+
+def test_a_zero_byte_workflow_passes_the_validator(tmp_path):
+    """Why Check 4 counts non-empty files and compares against an expected count.
+
+    A per-file fetch failure is the quiet one: the redirect creates the file
+    before `gh api` runs, so a failure leaves a 0-byte stub. The validator has
+    nothing to complain about in an empty file, so a snapshot that silently
+    lost the one oversized caller exits 0 and reads as compliant. The fetch
+    step therefore deletes such stubs, and Check 4 compares the number of
+    files that landed against the number the listing advertised.
+    """
+    wf_dir = tmp_path / ".github" / "workflows"
+    wf_dir.mkdir(parents=True)
+    (wf_dir / "promote-testing-to-main.yml").write_text("")
+
+    result = _run_validator(tmp_path)
+    assert result.returncode == 0
+    assert "promote-testing-to-main.yml" not in result.stdout
 
 
 def _check4_block():
@@ -119,3 +138,43 @@ def test_check4_reports_empty_snapshots_and_validator_errors_as_drift():
     assert "thin-caller-snapshot-empty" in block
     assert "thin-caller-gate-error" in block
     assert "snapshot_count == 0" in block
+
+
+def test_check4_counts_only_non_empty_files():
+    """A 0-byte stub is a failed fetch; counting it hides a partial snapshot."""
+    block = _check4_block()
+    assert "-size +0" in block, (
+        "Check 4's find must exclude 0-byte files, or a snapshot whose fetches "
+        "failed per-file counts as fully fetched."
+    )
+
+
+def test_check4_reports_a_shortfall_against_the_advertised_count():
+    """Losing some files must not read the same as losing none."""
+    block = _check4_block()
+    assert "thin-caller-snapshot-incomplete" in block
+    assert re.search(r"snapshot_count\s*<\s*expected_count", block)
+
+
+def test_fetch_step_fails_loudly_on_a_failed_listing():
+    """The listing is a plain assignment under `set -e`, not a swallowed pipeline.
+
+    The earlier form piped `gh api ... 2>/dev/null` straight into a `while`
+    loop, so a failed listing produced an empty snapshot instead of a failed
+    step. Check 4's empty-snapshot guard documented that as its trigger; the
+    fetch step now fails on it directly, which is the louder outcome.
+    """
+    text = FACTORY_DRIFT.read_text()
+    start = text.index("Fetch workflow files")
+    block = text[start : text.index("Detect drift")]
+
+    assert re.search(r"wf_list=\$\(\s*\n\s*gh api", block), (
+        "The consumer workflow listing must be a command substitution so a "
+        "non-zero gh api aborts the step under `set -euo pipefail`."
+    )
+    # The per-file fetch must not leave a 0-byte stub behind.
+    assert "rm -f" in block
+    assert not re.search(r"base64 -d >[^\n]*\|\|\s*true", block), (
+        "A swallowed per-file fetch leaves a 0-byte file that counts as a "
+        "fetched workflow."
+    )
