@@ -16,12 +16,19 @@
 # has no such access regardless of the `permissions:` block below, so this job
 # mints a MergeRaptor app token instead. Note: being a branch-ruleset bypass
 # actor is a ruleset setting, not an app installation permission — it does not
-# by itself grant this token Administration:read. If the MergeRaptor GitHub
-# App installation lacks that permission, both fields stay unreadable even
-# with this token; the script (renovate-automerge-wiring-check.sh) reports
-# that case as an explicit "... is unreadable" failure rather than a false
-# "setting is disabled" negative, so it's still safe to ship without first
-# confirming the installation's permission set. See projectbluefin/actions#514.
+# by itself grant this token Administration:read.
+#
+# If the MergeRaptor GitHub App installation lacks Administration:read, this
+# job fails at the "Generate app token" step, not in the script: the step below
+# asks for `permission-administration: read`, and GitHub's installation-token
+# endpoint rejects a request for a permission the installation does not hold
+# with a 422 rather than minting a downscoped token. Either way the failure is
+# loud and names the real cause — the script's "... is unreadable" branches
+# (renovate-automerge-wiring-check.sh) remain the guard for any other token
+# that reaches it without push/administration access, so a permission gap can
+# never surface as a false "setting is disabled" negative. This is still safe
+# to ship without first confirming the installation's permission set; it just
+# reports that case at mint time. See projectbluefin/actions#514.
 
 name: Renovate Auto-merge Wiring Check
 
