@@ -205,6 +205,10 @@ Rules that keep the pass safe:
   the alert title format in one place only if you change it in both.
 - Every open alert matching the prefix is closed, not just the first, so duplicates from earlier
   breaches do not linger.
+- The whole close pass is best-effort, and that includes resolving which alerts recovered. The
+  step runs under `set -euo pipefail`, so the `factory_health_resolve.py` call is wrapped in
+  `if ! ...` and falls back to `[]` on failure. Closing was added on top of a working alerting
+  pass; no failure in it may take that pass down.
 
 Because the workflow now runs a repository script, the job checks out the repo and needs
 `contents: read` in addition to `actions: read` and `issues: write`.

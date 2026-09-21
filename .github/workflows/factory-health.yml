@@ -211,9 +211,17 @@ jobs:
           printf '%s' "${results}" > "${RUNNER_TEMP}/factory-health-results.json"
           printf '%s' "${open_issues_json}" > "${RUNNER_TEMP}/factory-health-open-issues.json"
 
-          recovered_json=$(python3 scripts/factory_health_resolve.py \
+          # Resolving recoveries is itself best-effort: this step runs under
+          # `set -euo pipefail`, so an unguarded failure here (missing file,
+          # traceback) would abort before the breach loop and take down the
+          # pre-existing alerting pass — the opposite of what the note above
+          # promises. Fall back to "nothing recovered" and keep going.
+          if ! recovered_json=$(python3 scripts/factory_health_resolve.py \
             --results "${RUNNER_TEMP}/factory-health-results.json" \
-            --open-issues "${RUNNER_TEMP}/factory-health-open-issues.json")
+            --open-issues "${RUNNER_TEMP}/factory-health-open-issues.json"); then
+            echo "::warning::Could not resolve recovered alerts; skipping the close pass and continuing to alerting."
+            recovered_json='[]'
+          fi
 
           issues_closed=0
           while IFS= read -r recovered; do
