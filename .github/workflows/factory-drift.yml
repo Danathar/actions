@@ -190,10 +190,13 @@ jobs:
             short="${repo#projectbluefin/}"
             consumer_root="/tmp/workflows/${short}"
 
-            # -size +0: a 0-byte file is a failed fetch, not a workflow.
+            # The fetch step removes the 0-byte stub a failed per-file fetch
+            # leaves behind, so every file present here was fetched. A
+            # legitimately empty workflow file therefore counts, and does not
+            # read as a permanent shortfall against the advertised count.
             snapshot_count=$(
               find "${consumer_root}/.github/workflows" -maxdepth 1 -type f \
-                \( -name '*.yml' -o -name '*.yaml' \) -size +0 2>/dev/null \
+                \( -name '*.yml' -o -name '*.yaml' \) 2>/dev/null \
               | wc -l
             )
             expected_count=$(

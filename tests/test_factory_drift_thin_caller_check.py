@@ -140,12 +140,21 @@ def test_check4_reports_empty_snapshots_and_validator_errors_as_drift():
     assert "snapshot_count == 0" in block
 
 
-def test_check4_counts_only_non_empty_files():
-    """A 0-byte stub is a failed fetch; counting it hides a partial snapshot."""
+def test_failed_fetch_stub_is_removed_and_empty_files_still_count():
+    """A failed per-file fetch leaves a 0-byte stub; the fetch step must delete
+    it so the shortfall shows up in the count. Check 4 must then count every
+    file that is present, including a legitimately empty workflow file:
+    filtering on size there would report a permanent shortfall for a consumer
+    whose advertised count includes that empty file."""
+    text = FACTORY_DRIFT.read_text()
+    fetch_block = text.split("- name: Detect drift", 1)[0]
+    assert re.search(r'rm -f "\$\{dest\}/\$\{wf\}"', fetch_block), (
+        "the fetch loop must remove the 0-byte stub a failed fetch leaves behind"
+    )
     block = _check4_block()
-    assert "-size +0" in block, (
-        "Check 4's find must exclude 0-byte files, or a snapshot whose fetches "
-        "failed per-file counts as fully fetched."
+    assert "-size +0" not in block, (
+        "Check 4 must not filter on size: a successfully fetched empty file "
+        "is advertised and present, and excluding it makes advertised > landed forever."
     )
 
 
