@@ -110,6 +110,29 @@ enrollment back into the PR-construction job.
 ruleset. `use_merge_queue: true` selects `enqueuePullRequest`; it does not decide
 whether a release window is open.
 
+### `auto_merge` — what the PR body promises
+
+`auto_merge` is the third, separate axis: whether anything ever merges the
+promotion PR without a human. It is forwarded to `render-pr-body` and changes
+only the merge notice in the body. It defaults to `true`, which renders today's
+weekly auto-merge CAUTION block.
+
+Set it to `false` in a repository where a person merges the PR from the GitHub
+UI. A personal-account fork cannot use a merge queue, and `gh pr merge --auto`
+with no merge method fails without a TTY, so nothing there enrolls the PR. Such a
+caller pins both flags:
+
+```yaml
+enqueue_promotion: false
+auto_merge: false
+```
+
+Never derive the body's notice from `enqueue_promotion`. That flag is per run:
+bluefin passes `false` on every push and every non-Tuesday run, and the body is
+re-rendered on each of them, so the PR would claim a human merge all week and
+lose the `do-not-merge` instruction that is actionable during exactly that
+window.
+
 ### E2E policy
 
 Set `run_e2e: true` when the consumer's post-build E2E workflow is the release

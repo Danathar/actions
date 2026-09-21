@@ -199,6 +199,15 @@ reports `ready=true`, the enqueue job posts `validate` and enrolls the PR. Queue
 and auto-merge enrollment are idempotent, and the single exact `do-not-merge`
 decision is shared by validation and enrollment.
 
+`enqueue_promotion` answers "does this run enroll the PR"; `auto_merge` answers
+"does anything ever merge this PR without a human". Only `auto_merge` reaches the
+rendered PR body. Do not forward the cadence flag in its place: the body is
+re-rendered on every refresh event, and in the bluefin model those events all
+carry `enqueue_promotion: false`, so the PR would advertise a human merge for the
+whole week between release windows and drop the `do-not-merge` instruction
+exactly while it is the actionable one. A repository whose promotion PR really is
+merged by hand pins `auto_merge: false` alongside its `enqueue_promotion: false`.
+
 Release callers that resolve mutable source tags may pass `source_branch` to
 `reusable-execute-release.yml`. Before resolving tags, it requires that branch's
 current tree to match `fast_forward_sha`; a concurrent source advance fails
