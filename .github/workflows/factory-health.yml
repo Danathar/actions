@@ -171,6 +171,7 @@ jobs:
               --arg rate_display "${rate_display}" \
               --arg status "${status}" \
               --argjson consecutive_failures "${consecutive_failures}" \
+              --argjson min_runs "${MIN_RUNS}" \
               --arg failures_md "${failures_md}" \
               '{
                 repo: $repo,
@@ -182,6 +183,7 @@ jobs:
                 rate_display: $rate_display,
                 status: $status,
                 consecutive_failures: $consecutive_failures,
+                min_runs: $min_runs,
                 failures_md: $failures_md
               }'
           }
