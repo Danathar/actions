@@ -51,6 +51,7 @@ Coverage gate: `--cov-fail-under=75`
 | `sign-and-publish` keyless/key validation + SBOM attach/cache/path guards | `tests/bats/test_sign_and_publish.bats` (19 tests) |
 | `setup-runner` native-overlay setup & podman source selection | `tests/bats/test_setup_runner.bats` (16 tests) |
 | `chunka` config temp-file creation + `fs.protected_regular` drift guard | `tests/bats/test_chunka.bats` (4 tests) |
+| `factory-health.yml` pipeline status classification (threshold, sample floor, failure streak) | `tests/bats/test_factory_health_status.bats` (12 tests) |
 | `reusable-renovate-automerge.yml` check-rollup classification | `tests/bats/test_renovate_automerge_checks.bats` (8 tests) |
 | `reusable-renovate-automerge.yml` PR-lookup / qualification matcher | `tests/bats/test_renovate_automerge_find_pr.bats` (10 tests) |
 | `renovate-automerge-wiring.yml` wiring assertion (`scripts/renovate-automerge-wiring-check.sh`) | `tests/bats/test_renovate_automerge_wiring_check.bats` (10 tests) |
