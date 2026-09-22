@@ -19,6 +19,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
+      - name: Checkout actions repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Generate app token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
@@ -48,14 +51,56 @@ jobs:
 
           for repo in "${CONSUMER_REPOS[@]}"; do
             short="${repo#projectbluefin/}"
-            mkdir -p "/tmp/workflows/${short}"
-            gh api "repos/${repo}/contents/.github/workflows" \
-              --jq '.[].name' 2>/dev/null \
-            | while read -r wf; do
-                gh api "repos/${repo}/contents/.github/workflows/${wf}" \
-                  --jq '.content' 2>/dev/null \
-                | base64 -d > "/tmp/workflows/${short}/${wf}" 2>/dev/null || true
-              done
+            # Nested under .github/workflows so scripts/validate_thin_caller.py
+            # (which expects <root>/.github/workflows) can run directly
+            # against each consumer's fetched snapshot (Check 4).
+            dest="/tmp/workflows/${short}/.github/workflows"
+            mkdir -p "${dest}"
+
+            # Two failure modes, deliberately handled differently.
+            #
+            # A failed *listing* is loud but contained: it is recorded as a
+            # marker file that Check 4 turns into a drift item for THIS
+            # consumer, and the loop moves on. Aborting the whole step here
+            # would mean one consumer's transient 5xx (or a renamed repo)
+            # silently skipped Checks 1-5 for every other consumer that week,
+            # which is the silence a backstop must not have. Nothing
+            # downstream can mistake the marker for a clean consumer: Check 4
+            # reads it before it counts anything.
+            #
+            # A failed *per-file* fetch is the quiet one, and is what Check 4
+            # has to be able to see. Record how many files were advertised so
+            # Check 4 can compare that against how many actually landed.
+            # Filtered to the same extensions find_workflows() scans, so the
+            # expected and actual counts are measuring the same population.
+            if ! wf_list=$(
+              gh api "repos/${repo}/contents/.github/workflows" \
+                --jq '.[].name | select(endswith(".yml") or endswith(".yaml"))'
+            ); then
+              echo "::warning::Could not list ${repo}/.github/workflows; recorded as drift for that consumer"
+              : > "/tmp/workflows/${short}/.listing-failed"
+              continue
+            fi
+            if [[ -z "${wf_list}" ]]; then
+              wf_names=()
+            else
+              mapfile -t wf_names <<<"${wf_list}"
+            fi
+            printf '%s\n' "${#wf_names[@]}" \
+              > "/tmp/workflows/${short}/.expected-count"
+
+            for wf in "${wf_names[@]}"; do
+              if ! gh api "repos/${repo}/contents/.github/workflows/${wf}" \
+                --jq '.content' | base64 -d > "${dest}/${wf}"; then
+                # The redirect creates the file before the fetch runs, so a
+                # failure leaves a 0-byte stub that any later `find` counts
+                # as a fetched workflow -- which is exactly how a partial
+                # snapshot reads as a complete one. Remove it and let the
+                # count shortfall speak.
+                echo "::warning::Could not fetch ${repo}/.github/workflows/${wf}"
+                rm -f "${dest}/${wf}"
+              fi
+            done
           done
 
       - name: Detect drift
@@ -121,15 +166,93 @@ jobs:
             fi
           done
 
-          # ── Check 4: promote-testing-to-main LoC threshold ───────────────────
+          # ── Check 4: thin-caller size gate backstop (issue #546) ─────────────
+          # Runs the same canonical scripts/validate_thin_caller.py the
+          # opt-in reusable-thin-caller-gate.yml uses, against each
+          # consumer's fetched workflow snapshot, so the weekly backstop
+          # agrees with the pre-merge gate on what counts as a violation.
+          # Previously hardcoded to promote-testing-to-main.yml and counted
+          # raw `wc -l` (physical lines): once that workflow was extracted
+          # to ~41 effective lines it still tripped this check at 54
+          # physical lines (blank/comment lines included), a false positive,
+          # while any other oversized caller went undetected entirely.
+          # The validator's exit code is the verdict; its stdout is only the
+          # human-readable detail. Grepping stdout alone would report "no
+          # drift" for a crashed validator, since a traceback has no `  - `
+          # lines -- so the exit code is read, and an error becomes its own
+          # drift item.
+          #
+          # The other way to pass silently is a snapshot that is not what it
+          # looks like. The fetch step above fails loudly if a consumer's
+          # directory *listing* fails, so Check 4 never runs on a wholly
+          # unfetched consumer. What it can see is a *partial* fetch: an
+          # individual file that failed to download. The fetch step removes
+          # those 0-byte stubs and records how many files were advertised, so
+          # here a shortfall between advertised and landed is reportable
+          # rather than invisible -- a snapshot missing the one oversized
+          # caller would otherwise pass clean.
+          #
+          # Silence on missing evidence is the one failure a backstop must not
+          # have, so each case becomes its own drift item.
           for repo in "${CONSUMER_REPOS[@]}"; do
             short="${repo#projectbluefin/}"
-            promote_wf="/tmp/workflows/${short}/promote-testing-to-main.yml"
-            if [[ -f "${promote_wf}" ]]; then
-              loc=$(wc -l < "${promote_wf}")
-              if [[ "${loc}" -gt 50 ]]; then
-                drift_items+=("${repo}|promote-loc-drift|promote-testing-to-main.yml is ${loc} lines (threshold: 50) — candidate for reusable extraction")
-              fi
+            consumer_root="/tmp/workflows/${short}"
+
+            # The fetch step removes the 0-byte stub a failed per-file fetch
+            # leaves behind, so every file present here was fetched. A
+            # legitimately empty workflow file therefore counts, and does not
+            # read as a permanent shortfall against the advertised count.
+            snapshot_count=$(
+              find "${consumer_root}/.github/workflows" -maxdepth 1 -type f \
+                \( -name '*.yml' -o -name '*.yaml' \) 2>/dev/null \
+              | wc -l
+            )
+            expected_count=$(
+              cat "${consumer_root}/.expected-count" 2>/dev/null || echo 0
+            )
+            # The fetch step could not even list this consumer's workflows.
+            # Its own drift item, checked before any count, so a listing
+            # failure never reads as "no workflows" or as a clean consumer.
+            if [[ -e "${consumer_root}/.listing-failed" ]]; then
+              drift_items+=("${repo}|thin-caller-listing-failed|Could not list this consumer's .github/workflows (API error or repository moved); the thin-caller backstop did not run against it")
+              continue
+            fi
+            # A consumer that advertises no workflow files has nothing for the
+            # thin-caller gate to check; that is not drift.
+            if (( expected_count == 0 )); then
+              continue
+            fi
+            if (( snapshot_count == 0 )); then
+              drift_items+=("${repo}|thin-caller-snapshot-empty|No workflow files were fetched for this consumer; the thin-caller backstop did not run against it")
+              continue
+            fi
+            if (( snapshot_count < expected_count )); then
+              drift_items+=("${repo}|thin-caller-snapshot-incomplete|Fetched ${snapshot_count} of ${expected_count} advertised workflow files; the thin-caller backstop checked an incomplete snapshot and a missing file cannot be cleared")
+              continue
+            fi
+
+            set +e
+            gate_output=$(python3 scripts/validate_thin_caller.py --root "${consumer_root}" --max-lines 50 2>&1)
+            gate_status=$?
+            set -e
+
+            if (( gate_status == 0 )); then
+              continue
+            fi
+
+            violations=$(grep '^  - ' <<<"${gate_output}" || true)
+            if (( gate_status == 1 )) && [[ -n "${violations}" ]]; then
+              detail=$(
+                echo "${violations}" \
+                | sed -e 's/^  - //' -e "s#${consumer_root}/.github/workflows/##" \
+                | tr '\n' ';' | sed 's/;$//' | sed 's/;/; /g'
+              )
+              drift_items+=("${repo}|thin-caller-loc-drift|Thin-caller size gate violations: ${detail}")
+            else
+              # Non-zero without a violation list means the validator itself
+              # failed. Report that rather than swallowing it as a clean pass.
+              detail=$(tr '\n' ' ' <<<"${gate_output}" | cut -c1-300)
+              drift_items+=("${repo}|thin-caller-gate-error|Thin-caller gate exited ${gate_status} without reporting violations: ${detail}")
             fi
           done
 

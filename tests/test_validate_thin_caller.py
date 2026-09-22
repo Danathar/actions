@@ -38,6 +38,19 @@ def test_file_uses_projectbluefin(tmp_path):
     f2.write_text("uses: actions/checkout@v4\n")
     assert file_uses_projectbluefin(f2) is False
 
+    # A composite-action reference (bootc-build/*) is not a reusable-workflow
+    # delegation — it's a step among other logic, not a thin pointer, and
+    # consumer repos like bluefin have long, legitimately-sized workflows
+    # built this way (issue #546).
+    f3 = tmp_path / "composite_action.yml"
+    f3.write_text("uses: projectbluefin/actions/bootc-build/validate-pr@v1\n")
+    assert file_uses_projectbluefin(f3) is False
+
+    # A commented-out reference is documentation, not a caller (issue #546).
+    f4 = tmp_path / "commented.yml"
+    f4.write_text("#   uses: projectbluefin/actions/.github/workflows/reusable-build.yml@v1\nname: x\n")
+    assert file_uses_projectbluefin(f4) is False
+
 
 def test_find_workflows(tmp_path):
     wf_dir = tmp_path / ".github" / "workflows"

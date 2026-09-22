@@ -31,6 +31,7 @@ Agent entry point for `projectbluefin/actions`. Load only the skill relevant to 
 | Wire a consuming repo to the shared reusable workflow | `docs/skills/consumer-guide.md` |
 | Validate action changes against consumers before merge | `docs/skills/consumer-validation.md` |
 | Understand the consumer-validation PR check | `docs/skills/consumer-validation.md` |
+| Enforce the thin-caller size gate on a caller workflow, or wire it into a consumer repo's CI | `docs/skills/thin-caller-gate.md` |
 | Add upgrade/rollback testing to a bootc image repo | `docs/skills/consumer-guide/upgrade-and-migration.md` → "Upgrade test" |
 | Use these actions in a new or external bootc image repo | `docs/skills/consumer-guide.md` |
 | Understand the Justfile contract for the reusable workflow | `docs/skills/consumer-guide.md` → "Path 1" |
@@ -75,6 +76,7 @@ Agent entry point for `projectbluefin/actions`. Load only the skill relevant to 
 | [`consumer-guide.md`](skills/consumer-guide.md) | Onboarding a new image repo: Path 1 (reusable workflow) and Path 2 (à la carte), checklist |
 | [`consumer-guide/upgrade-and-migration.md`](skills/consumer-guide/upgrade-and-migration.md) | Upgrade test gate, migration test, dakota Path 2 notes, live consumer examples |
 | [`consumer-validation.md`](skills/consumer-validation.md) | Required consumer validation flow and blast radius before merge |
+| [`thin-caller-gate.md`](skills/thin-caller-gate.md) | Thin-caller size contract, canonical validator, consumer opt-in via `reusable-thin-caller-gate.yml` |
 | [`determinism.md`](skills/determinism.md) | Non-deterministic surfaces in the factory: classification, mitigations, investigations |
 | [`factory-operations.md`](skills/factory-operations.md) | Production gate (2-human approval), factory health monitor, Renovate auto-merge, promotion PR format (Design C) |
 | [`supply-chain.md`](skills/supply-chain.md) | SLSA Build L2 posture, SBOM attestation, cosign verify scoping, Trivy CVE scanning, vendoring external build files |

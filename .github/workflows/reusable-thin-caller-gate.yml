@@ -1,0 +1,68 @@
+name: reusable-thin-caller-gate
+
+# Thin-caller size gate for consumer repos (issue #546, follow-up to #411).
+#
+# The provider (projectbluefin/actions) has no active caller workflows, so the
+# gate added for #411 runs vacuously there. Consumer repos call this reusable
+# as a job in their own PR checks so a caller workflow that delegates to
+# projectbluefin/actions and grows past the 50-line threshold fails *before*
+# it reaches that repo's main, instead of only being caught by the weekly
+# factory-drift backstop.
+#
+# Single source of truth: the validator source is an explicit input
+# (actions_repository/actions_ref), defaulting to projectbluefin/actions@v1,
+# instead of a value baked into the checkout step. A consumer that pins a
+# future @v2 of this reusable inherits that version's own defaults; nothing
+# here silently drifts to whatever @v1 happens to point at independently of
+# the ref the consumer actually invoked. Opt in from a consumer repo by
+# adding a job (reusable workflows can only be called at the job level, not
+# as a step):
+#
+#   jobs:
+#     thin-caller-gate:
+#       uses: projectbluefin/actions/.github/workflows/reusable-thin-caller-gate.yml@v1
+
+on:
+  workflow_call:
+    inputs:
+      actions_repository:
+        description: >-
+          projectbluefin/actions fork/repo to source scripts/validate_thin_caller.py
+          from. Override only to validate a fork or branch of this reusable
+          itself; consumers should leave this at the default.
+        type: string
+        default: projectbluefin/actions
+      actions_ref:
+        description: >-
+          Ref of actions_repository to check out the validator script from.
+          Override only to validate a fork or branch of this reusable itself.
+        type: string
+        default: v1
+
+permissions: {}
+
+jobs:
+  thin-caller-gate:
+    name: Thin-caller size gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout caller repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Checkout thin-caller gate script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.actions_repository }}
+          ref: ${{ inputs.actions_ref }}
+          path: thin-caller-gate
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Run thin-caller size gate
+        run: python3 thin-caller-gate/scripts/validate_thin_caller.py --max-lines 50 --root .
