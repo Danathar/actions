@@ -3,12 +3,20 @@
 # Wiring assertion for the Renovate/MergeRaptor auto-merge path (issue #403).
 #
 # Covers:
+#
 #   - allow_auto_merge must be true
 #   - mergeraptor must be the SOLE bypass actor on main (app type; no user/team,
 #     no second app, present exactly once)
 #   - a branch ruleset must enforce main
 #   - the live mergeraptor/renovate PR report renders a found PR or "(none)"
 #   - any failed assertion makes the script exit non-zero
+#   - a token lacking push/administration access omits allow_auto_merge and
+#     bypass_actors from the API response (JSON null / missing key) rather
+#     than reporting them false/empty — this must be reported as a distinct
+#     "unreadable" failure, never conflated with "the setting is off"
+#     (projectbluefin/actions#514)
+#   - a missing branch ruleset must not also emit the bypass-actor-count
+#     failure (bypass_readable must gate that block in every unreadable path)
 
 setup() {
   SCRIPT="${BATS_TEST_DIRNAME}/../../scripts/renovate-automerge-wiring-check.sh"
@@ -45,6 +53,24 @@ EOF
   chmod +x "${MOCK_DIR}/gh"
 }
 
+# Same idea, but exercises the real production path: `gh api .../rulesets`
+# returns an array (as GitHub actually does), and the script fetches the
+# matching branch ruleset's detail separately by id.
+write_gh_mock_ruleset_list() {
+  local repo_field="$1" list_json="$2" detail_json="$3" graphql="$4"
+  # shellcheck disable=SC2086,SC2054
+  cat > "${MOCK_DIR}/gh" <<EOF
+#!/usr/bin/env bash
+case "\$1 \$2" in
+  "api repos/projectbluefin/actions") echo '${repo_field}' ;;
+  "api repos/projectbluefin/actions/rulesets") echo '${list_json}' ;;
+  "api repos/projectbluefin/actions/rulesets/42") echo '${detail_json}' ;;
+  "api graphql") printf '%s\\n' '${graphql}' ;;
+esac
+EOF
+  chmod +x "${MOCK_DIR}/gh"
+}
+
 set_healthy_gh() {
   write_gh_mock 'true' \
     '{"target":"branch","conditions":{"ref_name":{"include":["refs/heads/main"]}},"bypass_actors":[{"actor_name":"mergeraptor","actor_type":"app"}]}' \
@@ -73,13 +99,24 @@ not_ok() { grep -q "Auto-merge wiring check: FAILED" <<<"$output"; }
   not_ok
 }
 
-@test "allow_auto_merge absent (null) fails" {
+@test "allow_auto_merge omitted by the API (null) is reported as unreadable, not false" {
   write_gh_mock 'null' \
     '{"target":"branch","conditions":{"ref_name":{"include":["refs/heads/main"]}},"bypass_actors":[{"actor_name":"mergeraptor","actor_type":"app"}]}' \
     '  (none)'
   run "$SCRIPT"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"FAIL: repo allow_auto_merge is not true"* ]]
+  [[ "$output" == *"FAIL: repo allow_auto_merge is unreadable"* ]]
+  [[ "$output" != *"FAIL: repo allow_auto_merge is not true"* ]]
+}
+
+@test "bypass_actors omitted by the API is reported as unreadable, not zero actors" {
+  write_gh_mock 'true' \
+    '{"target":"branch","conditions":{"ref_name":{"include":["refs/heads/main"]}}}' \
+    '  (none)'
+  run "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"FAIL: main branch ruleset bypass_actors is unreadable"* ]]
+  [[ "$output" != *"FAIL: mergeraptor app is not exactly one bypass actor on main"* ]]
 }
 
 @test "no bypass actors on main fails" {
@@ -118,11 +155,35 @@ not_ok() { grep -q "Auto-merge wiring check: FAILED" <<<"$output"; }
   [[ "$output" == *"FAIL: mergeraptor app is not exactly one bypass actor on main"* ]]
 }
 
-@test "no branch ruleset enforcing main fails" {
+@test "no branch ruleset enforcing main fails, without a spurious bypass-actor message" {
   write_gh_mock 'true' 'null' '  (none)'
   run "$SCRIPT"
   [ "$status" -ne 0 ]
   [[ "$output" == *"FAIL: no branch ruleset enforces main"* ]]
+  [[ "$output" != *"mergeraptor app is not exactly one bypass actor on main"* ]]
+}
+
+@test "array rulesets response: detail fetch finds main ruleset and reads bypass_actors" {
+  write_gh_mock_ruleset_list 'true' \
+    '[{"id":42,"target":"branch","enforcement":"active"}]' \
+    '{"target":"branch","conditions":{"ref_name":{"include":["refs/heads/main"]}},"bypass_actors":[{"actor_name":"mergeraptor","actor_type":"app"}]}' \
+    '  (none)'
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'bypass_actors = [{"actor_name":"mergeraptor","actor_type":"app"}]'* ]]
+  ok
+}
+
+@test "array rulesets response: detail fetch omits bypass_actors (non-admin token) is unreadable" {
+  write_gh_mock_ruleset_list 'true' \
+    '[{"id":42,"target":"branch","enforcement":"active"}]' \
+    '{"target":"branch","conditions":{"ref_name":{"include":["refs/heads/main"]}}}' \
+    '  (none)'
+  run "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"FAIL: main branch ruleset bypass_actors is unreadable"* ]]
+  [[ "$output" != *"FAIL: no branch ruleset enforces main"* ]]
+  [[ "$output" != *"mergeraptor app is not exactly one bypass actor on main"* ]]
 }
 
 @test "live PR report shows (none) when no qualifying PR exists" {
