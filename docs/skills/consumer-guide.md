@@ -84,6 +84,7 @@ jobs:
 | `architecture` | no | `'["x86_64"]'` | JSON array; `aarch64` requires self-hosted ARM runner |
 | `kernel_pin` | no | `""` | Full kernel version string; passed through to build and tag recipes |
 | `pr_number` | no | `""` | Set by `e2e-dispatch.yml` — scopes tags to the PR number |
+| `rechunk` | no | `"false"` | `true` re-enables rechunking, package update-interval xattrs, and SBOM generation on the `testing` stream (skipped by default to protect runners from Syft OOM on large images) |
 
 ### Output
 

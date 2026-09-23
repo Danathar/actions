@@ -168,7 +168,9 @@ The reusable workflow's `architecture` input is the concrete pattern to follow b
 
 The workflow stages SBOMs as `IMAGE_NAME.sbom.json` (flat rename from `sbom_out/IMAGE_NAME/sbom.json`) before upload. The `generate-release.yml` workflow expects this `*.sbom.json` glob shape.
 
-SBOM generation and upload should run for every non-PR build, including the `testing` stream. Weekly promotions retag testing digests directly to production tags, so skipping SBOM on testing leaves promoted images without signed SBOM referrers.
+SBOM generation and upload run for every non-PR build except the `testing` stream, where they are opt-in (see below). That exception carries a cost a consumer has to weigh: weekly promotions retag testing digests directly to production tags, so a consumer that promotes from testing without opting in ships promoted images with no signed SBOM referrer. Opt in with `rechunk: 'true'` unless the runner cannot survive Syft on those images.
+
+**Testing-stream skip and the `rechunk` opt-in.** By default the workflow skips SBOM generation/upload, `Apply package update-interval xattrs`, and `Rechunk Image` on the `testing` stream: Syft OOM-kills the runner by mmapping large OCI images, and rechunking would re-introduce the same memory pressure. A consumer whose testing images are small enough can opt back in with `rechunk: 'true'`, which re-enables all three step groups and the rechunk-metadata verification for testing builds. Treat `rechunk` like `publish_stream_tag`: it is a string input, so compare explicitly (`inputs.rechunk == 'true'`), never truthy-check it. Secureboot Check stays skipped on the testing stream regardless.
 
 ---
 
