@@ -158,6 +158,34 @@ falls below the success-rate threshold.
 - Issues are filed in `projectbluefin/common` with the labels that currently exist from:
   `priority/p0`, `area/ci`, `kind/bug`
 
+### Bound the run fetch by the window, not by a run count
+
+**`gh run list` must carry `--created ">=${CUTOFF_ISO}"`.** The monitor used to fetch each
+pipeline's most recent 100 runs and then discard everything older than the 24h window
+client-side. That makes the sample a function of run volume rather than of the window: once a
+pipeline produces more runs than the fetch limit inside the window, the oldest in-window runs
+are never fetched, and the rate is computed from a silently truncated sample. In the worst case
+every fetched run predates the window and a healthy pipeline reports `no-runs`.
+
+It was never close to firing — measured across all monitored pipelines, a 100-run fetch spanned
+9 to 93 days and yielded 0-38 in-window runs — but the margin was accidental. It also shrinks as
+the monitor discards more of what it fetches: any event the rate filter excludes still consumes
+fetch slots on the way to being thrown away.
+
+Rules:
+
+- `CUTOFF_ISO` and `CUTOFF_EPOCH` are both derived from `WINDOW_HOURS`, so the server-side fetch
+  bound and the client-side cutoff cannot drift apart.
+- Keep the client-side cutoff filter. `--created` is a search qualifier applied by the API, not a
+  guarantee about the returned set; the rate must be computed over exactly the window the alert
+  claims. Verified equal on all 10 monitored pipelines over a 7-day window before relying on it.
+- `RUN_FETCH_LIMIT` still caps the fetch, and saturating it (`fetched >= RUN_FETCH_LIMIT`) emits
+  a `::warning::` naming the pipeline. A truncated sample is reported, never passed off as a
+  complete window.
+- Emit that warning on **stderr**. `monitor_pipeline()` writes its result JSON to stdout and the
+  caller captures it; a workflow command on stdout would corrupt the captured JSON. The runner
+  parses `::warning::` from both streams, so `>&2` costs nothing.
+
 ### Authentication pattern
 
 Use the workflow `github.token` for read-only `gh run list` calls against the public factory repos.
@@ -634,6 +662,9 @@ Do not use this skill to:
 - Disabling `run_e2e` or promotion gates without explicit maintainer sign-off.
 - Renovate creating duplicate PRs to pin first-party `projectbluefin/actions` references.
 - Missing `MERGERAPTOR_APP_ID` or private keys leading to silent auto-merge workflow failures.
+- A `gh run list` in the health monitor bounded only by `--limit`, with the time window applied
+  afterwards in `jq` — the sample then depends on run volume, not on the window, and truncation
+  is silent.
 
 ## Verification
 
@@ -642,3 +673,5 @@ Do not use this skill to:
 - [ ] Merge queue configuration matches each repository's promotion contract (`use_merge_queue`).
 - [ ] Factory health monitor scheduled runs complete and create alert issues when failure thresholds are crossed.
 - [ ] Renovate auto-merge workflow runs with valid GitHub App authentication and branch protection bypasses.
+- [ ] Factory health `gh run list` calls pass `--created ">=${CUTOFF_ISO}"` and warn when the
+      `RUN_FETCH_LIMIT` cap saturates (`tests/test_factory_health_fetch.py`).

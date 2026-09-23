@@ -39,6 +39,12 @@ jobs:
           WINDOW_HOURS=24
           THRESHOLD=80
           CUTOFF_EPOCH=$(date -u -d "${WINDOW_HOURS} hours ago" '+%s')
+          # Same instant as CUTOFF_EPOCH, in the form `gh run list --created`
+          # accepts, so the fetch is bounded by the window the rate is computed
+          # over instead of by an arbitrary run count. Both are derived from
+          # WINDOW_HOURS so they cannot drift apart.
+          CUTOFF_ISO=$(date -u -d "@${CUTOFF_EPOCH}" '+%Y-%m-%dT%H:%M:%SZ')
+          RUN_FETCH_LIMIT=200
 
           if [[ -n "${COMMON_ISSUE_TOKEN}" ]]; then
             ISSUE_REPO="projectbluefin/common"
@@ -54,15 +60,33 @@ jobs:
             local pipeline="$2"
             local workflow="$3"
 
-            local runs_json recent_json completed_json total success rate_display rate_value status failures_md
+            local runs_json fetched recent_json completed_json total success rate_display rate_value status failures_md
 
+            # `--created` filters server-side, so the fetch budget is spent on
+            # runs inside the window instead of on history that the cutoff
+            # filter below discards anyway. Without it the 24h sample is
+            # defended only by low run volume: a busy pipeline's most recent
+            # N runs can all predate the window, silently shrinking the
+            # measured set — worst case a healthy pipeline reads `no-runs`.
             runs_json=$(gh run list \
               --repo "${repo}" \
               --workflow "${workflow}" \
-              --limit 100 \
+              --created ">=${CUTOFF_ISO}" \
+              --limit "${RUN_FETCH_LIMIT}" \
               --json createdAt,status,conclusion,url \
               2>/dev/null || echo '[]')
 
+            # Saturating the cap means the window may still be truncated.
+            # Say so rather than reporting a rate computed from a partial
+            # sample as if it were the whole window.
+            fetched=$(jq 'length' <<<"${runs_json}")
+            if (( fetched >= RUN_FETCH_LIMIT )); then
+              echo "::warning::${repo} / ${workflow}: fetched ${fetched} runs, saturating the ${RUN_FETCH_LIMIT}-run cap for the ${WINDOW_HOURS}h window; the measured sample may be truncated. Raise RUN_FETCH_LIMIT in factory-health.yml." >&2
+            fi
+
+            # Kept even though --created already bounds the fetch: the server
+            # filter is a search qualifier, not a guarantee, and the rate must
+            # be computed over exactly the window the alert claims.
             recent_json=$(jq --argjson cutoff "${CUTOFF_EPOCH}" '
               [ .[]
               | select((.createdAt | fromdateiso8601) >= $cutoff)
