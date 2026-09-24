@@ -3,7 +3,7 @@ Tests for scripts/factory_health_resolve.py — factory alert recovery pass.
 
 Covers: title-prefix agreement with factory-health.yml, healthy pipelines
 closing their alerts, alerting/no-runs pipelines keeping them open, duplicate
-alerts, cross-pipeline isolation, and the CLI round trip.
+alerts, cross-pipeline isolation, the author filter, and the CLI round trip.
 """
 
 from __future__ import annotations
@@ -20,6 +20,10 @@ from factory_health_resolve import alert_title_prefix, recovered_alerts
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "factory-health.yml"
 SCRIPT = REPO_ROOT / "scripts" / "factory_health_resolve.py"
+
+# The login `gh issue list --json author` reports for the workflow token; the
+# real misrouted alerts (projectbluefin/actions#490) carry exactly this author.
+BOT = "app/github-actions"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -44,12 +48,18 @@ def _result(
     }
 
 
-def _issue(number: int = 490, repo: str = "projectbluefin/dakota", pipeline: str = "Promote") -> dict:
+def _issue(
+    number: int = 490,
+    repo: str = "projectbluefin/dakota",
+    pipeline: str = "Promote",
+    author: str = BOT,
+) -> dict:
     title = f"{alert_title_prefix(repo, pipeline)} to 75% (24h window)"
     return {
         "number": number,
         "title": title,
         "url": f"https://github.com/projectbluefin/actions/issues/{number}",
+        "author": {"login": author, "is_bot": author.startswith("app/")},
     }
 
 
@@ -81,7 +91,7 @@ class TestAlertTitlePrefix:
 
 class TestRecoveredAlerts:
     def test_healthy_pipeline_with_open_alert_is_recovered(self):
-        recovered = recovered_alerts([_result()], [_issue()])
+        recovered = recovered_alerts([_result()], [_issue()], BOT)
         assert [r["number"] for r in recovered] == [490]
         assert recovered[0]["rate_display"] == "100%"
         assert recovered[0]["workflow"] == "Publish Bluefin dakota"
@@ -89,35 +99,35 @@ class TestRecoveredAlerts:
         assert recovered[0]["total"] == 4
 
     def test_healthy_pipeline_without_open_alert_is_a_noop(self):
-        assert recovered_alerts([_result()], []) == []
+        assert recovered_alerts([_result()], [], BOT) == []
 
     def test_alerting_pipeline_keeps_its_issue_open(self):
         results = [_result(status="alert", rate_display="75%", success=3, total=4)]
-        assert recovered_alerts(results, [_issue()]) == []
+        assert recovered_alerts(results, [_issue()], BOT) == []
 
     def test_no_runs_window_is_not_a_recovery(self):
         """An empty window is absence of evidence, not evidence of a fix."""
         results = [_result(status="no-runs", rate_display="n/a", success=0, total=0)]
-        assert recovered_alerts(results, [_issue()]) == []
+        assert recovered_alerts(results, [_issue()], BOT) == []
 
     def test_other_pipelines_in_the_same_repo_are_untouched(self):
         results = [_result(pipeline="Promote")]
         build_alert = _issue(number=482, pipeline="Build")
-        assert recovered_alerts(results, [build_alert]) == []
+        assert recovered_alerts(results, [build_alert], BOT) == []
 
     def test_same_pipeline_name_in_another_repo_is_untouched(self):
         results = [_result(repo="projectbluefin/dakota", pipeline="Promote")]
         lts_alert = _issue(number=481, repo="projectbluefin/bluefin-lts", pipeline="Promote")
-        assert recovered_alerts(results, [lts_alert]) == []
+        assert recovered_alerts(results, [lts_alert], BOT) == []
 
     def test_duplicate_alerts_for_one_pipeline_are_all_closed(self):
         issues = [_issue(number=490), _issue(number=491)]
-        recovered = recovered_alerts([_result()], issues)
+        recovered = recovered_alerts([_result()], issues, BOT)
         assert sorted(r["number"] for r in recovered) == [490, 491]
 
     def test_unrelated_issues_are_ignored(self):
         issues = [{"number": 546, "title": "Enforce thin-caller gate", "url": ""}]
-        assert recovered_alerts([_result()], issues) == []
+        assert recovered_alerts([_result()], issues, BOT) == []
 
     def test_multiple_pipelines_recover_independently(self):
         results = [
@@ -125,11 +135,29 @@ class TestRecoveredAlerts:
             _result(pipeline="Build", workflow="Build Bluefin dakota", status="alert"),
         ]
         issues = [_issue(number=490, pipeline="Promote"), _issue(number=482, pipeline="Build")]
-        recovered = recovered_alerts(results, issues)
+        recovered = recovered_alerts(results, issues, BOT)
         assert [r["number"] for r in recovered] == [490]
 
+    def test_alert_shaped_issue_from_another_author_is_left_open(self):
+        """Anyone can title an issue like an alert; only the bot's own are closed."""
+        human = _issue(number=600, author="someone")
+        other_bot = _issue(number=601, author="app/renovate")
+        issues = [human, other_bot, _issue(number=490)]
+        assert [r["number"] for r in recovered_alerts([_result()], issues, BOT)] == [490]
+
+    def test_issue_without_author_is_left_open(self):
+        issue = _issue()
+        del issue["author"]
+        assert recovered_alerts([_result()], [issue], BOT) == []
+
+    def test_empty_author_closes_nothing(self):
+        """A missing login must fail closed, not match every alert-shaped issue."""
+        issue = _issue()
+        issue["author"] = {"login": ""}
+        assert recovered_alerts([_result()], [issue], "") == []
+
     def test_missing_fields_do_not_raise(self):
-        recovered = recovered_alerts([{"status": "healthy"}], [{"title": ""}])
+        recovered = recovered_alerts([{"status": "healthy"}], [{"title": ""}], BOT)
         assert recovered == []
 
 
@@ -150,6 +178,8 @@ class TestCli:
                 str(results_path),
                 "--open-issues",
                 str(issues_path),
+                "--author",
+                BOT,
             ],
             capture_output=True,
             text=True,
@@ -172,6 +202,8 @@ class TestCli:
                 str(results_path),
                 "--open-issues",
                 str(issues_path),
+                "--author",
+                BOT,
                 "--output",
                 str(out_path),
             ],

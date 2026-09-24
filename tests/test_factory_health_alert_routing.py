@@ -66,14 +66,19 @@ def _run_preamble(preamble: str, tmp_path: Path, token: str) -> dict:
     outputs = tmp_path / "github_output"
     outputs.touch()
     banner = tmp_path / "banner"
+    author = tmp_path / "author"
 
-    script = f'{preamble}\nprintf "%s" "${{misroute_banner}}" > "{banner}"\n'
+    script = (
+        f'{preamble}\nprintf "%s" "${{misroute_banner}}" > "{banner}"\n'
+        f'printf "%s" "${{ISSUE_AUTHOR}}" > "{author}"\n'
+    )
     proc = subprocess.run(
         ["bash", "-c", script],
         env={
             "PATH": "/usr/bin:/bin:/usr/local/bin",
             "COMMON_ISSUE_TOKEN": token,
             "APP_TOKEN_OUTCOME": "success" if token else "failure",
+            "APP_SLUG": "mergeraptor" if token else "",
             "GH_TOKEN": "ghs_workflow_token",
             "GITHUB_REPOSITORY": "projectbluefin/actions",
             "GITHUB_OUTPUT": str(outputs),
@@ -91,6 +96,7 @@ def _run_preamble(preamble: str, tmp_path: Path, token: str) -> dict:
     return {
         "outputs": parsed,
         "banner": banner.read_text(),
+        "author": author.read_text(),
         "stdout": proc.stdout,
     }
 
@@ -133,6 +139,16 @@ class TestRoutingDecision:
         assert "[!WARNING]" in banner
         assert "misrouted" in banner
         assert "projectbluefin/common" in banner
+
+    def test_close_pass_author_is_the_app_bot(self, routing_preamble, tmp_path):
+        # The close pass only touches issues this login opened; if it does not
+        # match what `gh issue list` reports, no alert ever closes again.
+        result = _run_preamble(routing_preamble, tmp_path, token="ghs_app_token")
+        assert result["author"] == "app/mergeraptor"
+
+    def test_fallback_close_pass_author_is_the_workflow_bot(self, routing_preamble, tmp_path):
+        result = _run_preamble(routing_preamble, tmp_path, token="")
+        assert result["author"] == "app/github-actions"
 
 
 # ── Visibility contract ───────────────────────────────────────────────────────

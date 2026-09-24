@@ -37,6 +37,7 @@ jobs:
         id: monitor
         env:
           COMMON_ISSUE_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           APP_TOKEN_OUTCOME: ${{ steps.app-token.outcome }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -58,13 +59,18 @@ jobs:
           # keeps monitoring alive when the token cannot be minted, but it also
           # makes the whole job conclude `success`, so the fallback was silent
           # in the checks UI for months (projectbluefin/actions#556).
+          # ISSUE_AUTHOR is the login each token files issues as, in the form
+          # `gh issue list --json author` reports it. The close pass only acts
+          # on alerts this account opened.
           if [[ -n "${COMMON_ISSUE_TOKEN}" ]]; then
             ISSUE_REPO="${INTENDED_ISSUE_REPO}"
             ISSUE_TOKEN="${COMMON_ISSUE_TOKEN}"
+            ISSUE_AUTHOR="app/${APP_SLUG}"
             ALERT_ROUTING="intended"
           else
             ISSUE_REPO="${GITHUB_REPOSITORY}"
             ISSUE_TOKEN="${GH_TOKEN}"
+            ISSUE_AUTHOR="app/github-actions"
             ALERT_ROUTING="fallback"
             echo "::warning::Could not mint the ${INTENDED_ISSUE_REPO} issue token (app-token step: ${APP_TOKEN_OUTCOME}); factory alerts will be misrouted to ${ISSUE_REPO}. See the app-token step log for the API error."
           fi
@@ -230,7 +236,7 @@ jobs:
             --repo "${ISSUE_REPO}" \
             --state open \
             --limit 100 \
-            --json number,title,url)
+            --json number,title,url,author)
 
           # Close alerts whose pipeline is healthy again. The dedupe check in
           # the breach loop below matches on the issue title prefix, so a stale
@@ -238,8 +244,10 @@ jobs:
           # repo+pipeline. Nothing closed these issues before, and
           # projectbluefin/actions#490 is the proof: dakota Promote recovered to
           # 100% on the rerun and its alert stayed open, muting that pipeline
-          # indefinitely. Closing is best-effort — a single issue that cannot be
-          # closed must not stop the alerting pass that follows.
+          # indefinitely. Only alerts opened by ISSUE_AUTHOR are closed: a title
+          # prefix alone does not prove this workflow opened the issue. Closing
+          # is best-effort — a single issue that cannot be closed must not stop
+          # the alerting pass that follows.
           printf '%s' "${results}" > "${RUNNER_TEMP}/factory-health-results.json"
           printf '%s' "${open_issues_json}" > "${RUNNER_TEMP}/factory-health-open-issues.json"
 
@@ -250,7 +258,8 @@ jobs:
           # promises. Fall back to "nothing recovered" and keep going.
           if ! recovered_json=$(python3 scripts/factory_health_resolve.py \
             --results "${RUNNER_TEMP}/factory-health-results.json" \
-            --open-issues "${RUNNER_TEMP}/factory-health-open-issues.json"); then
+            --open-issues "${RUNNER_TEMP}/factory-health-open-issues.json" \
+            --author "${ISSUE_AUTHOR}"); then
             echo "::warning::Could not resolve recovered alerts; skipping the close pass and continuing to alerting."
             recovered_json='[]'
           fi

@@ -205,6 +205,10 @@ Rules that keep the pass safe:
   the alert title format in one place only if you change it in both.
 - Every open alert matching the prefix is closed, not just the first, so duplicates from earlier
   breaches do not linger.
+- Only alerts opened by the alerting account are closed. The title prefix is not proof the
+  workflow opened an issue, and anyone who can file an issue in the alert repo can copy it. The
+  workflow passes `--author` as `gh issue list` reports it: `app/<app-slug>` from the app-token
+  step when routing is intended, `app/github-actions` on fallback. An empty author closes nothing.
 - The whole close pass is best-effort, and that includes resolving which alerts recovered. The
   step runs under `set -euo pipefail`, so the `factory_health_resolve.py` call is wrapped in
   `if ! ...` and falls back to `[]` on failure. Closing was added on top of a working alerting

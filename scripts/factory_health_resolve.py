@@ -15,18 +15,24 @@ recovered to 100% on the rerun and the alert stayed open regardless).
 
 This module maps the health results plus the open issue list onto the issues
 that should now be closed: the pipeline is healthy again *and* an alert issue
-for it is still open.
+for it is still open *and* that issue was opened by the account that files the
+alerts.  The author check keeps the close pass off issues it did not open: a
+human tracking issue, or anyone's issue whose title happens to share the alert
+prefix, is left alone.
 
 Usage (from the workflow):
     python3 scripts/factory_health_resolve.py \
         --results results.json \
-        --open-issues open-issues.json
+        --open-issues open-issues.json \
+        --author app/mergeraptor
 
 ``--results`` is the array produced by the monitor loop (one object per
 pipeline, with ``repo``, ``pipeline``, ``workflow``, ``status``, ``rate_display``,
 ``success`` and ``total``).  ``--open-issues`` is ``gh issue list --json
-number,title,url`` output.  A JSON array of recovery records is written to
-stdout (or to ``--output``), each shaped:
+number,title,url,author`` output.  ``--author`` is the login the alerting token
+files issues as, in ``gh issue list`` form (``app/<app-slug>`` for a GitHub App
+bot, ``app/github-actions`` for the workflow token).  A JSON array of recovery
+records is written to stdout (or to ``--output``), each shaped:
 
     {
         "number": 490,
@@ -63,6 +69,7 @@ def alert_title_prefix(repo: str, pipeline: str) -> str:
 def recovered_alerts(
     results: list[dict],
     open_issues: list[dict],
+    author: str,
 ) -> list[dict]:
     """
     Return the open alert issues whose pipeline is healthy again.
@@ -72,11 +79,18 @@ def recovered_alerts(
     an absence of evidence, not evidence the pipeline was fixed, so its alert
     stays open until a real run proves otherwise.
 
+    Only issues opened by ``author`` qualify.  The title prefix alone is not
+    proof the workflow opened an issue, and the close pass comments on and
+    closes whatever it returns.  An empty ``author`` matches nothing, so a
+    missing login fails closed instead of widening the match.
+
     Every open issue matching the pipeline's title prefix is returned, not just
     the first — duplicates from earlier breaches are equally stale once the
     pipeline is healthy.
     """
     recovered: list[dict] = []
+    if not author:
+        return recovered
 
     for result in results:
         if result.get("status") != "healthy":
@@ -89,6 +103,8 @@ def recovered_alerts(
         for issue in open_issues:
             title = issue.get("title", "")
             if not title.startswith(prefix):
+                continue
+            if (issue.get("author") or {}).get("login") != author:
                 continue
             recovered.append(
                 {
@@ -111,6 +127,11 @@ def main() -> int:  # pragma: no cover
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--results", required=True, help="Pipeline health results JSON path")
     ap.add_argument("--open-issues", required=True, help="gh issue list JSON path")
+    ap.add_argument(
+        "--author",
+        required=True,
+        help="Login that files the alerts, as gh issue list reports it (app/<slug>)",
+    )
     ap.add_argument("--output", help="Write the JSON array here instead of stdout")
     args = ap.parse_args()
 
@@ -120,7 +141,7 @@ def main() -> int:  # pragma: no cover
     with open(args.open_issues, encoding="utf-8") as handle:
         open_issues = json.load(handle)
 
-    recovered = recovered_alerts(results, open_issues)
+    recovered = recovered_alerts(results, open_issues, args.author)
     payload = json.dumps(recovered, indent=2)
 
     if args.output:
