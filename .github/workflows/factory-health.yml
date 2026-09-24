@@ -34,8 +34,10 @@ jobs:
           permission-issues: write
 
       - name: Monitor 24h factory success rates
+        id: monitor
         env:
           COMMON_ISSUE_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_TOKEN_OUTCOME: ${{ steps.app-token.outcome }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -49,14 +51,44 @@ jobs:
           # WINDOW_HOURS so they cannot drift apart.
           CUTOFF_ISO=$(date -u -d "@${CUTOFF_EPOCH}" '+%Y-%m-%dT%H:%M:%SZ')
           RUN_FETCH_LIMIT=200
+          INTENDED_ISSUE_REPO="projectbluefin/common"
 
+          # Routing is reported to the job so the "Verify alert routing" step
+          # below can fail the run. `continue-on-error` on the app-token step
+          # keeps monitoring alive when the token cannot be minted, but it also
+          # makes the whole job conclude `success`, so the fallback was silent
+          # in the checks UI for months (projectbluefin/actions#556).
           if [[ -n "${COMMON_ISSUE_TOKEN}" ]]; then
-            ISSUE_REPO="projectbluefin/common"
+            ISSUE_REPO="${INTENDED_ISSUE_REPO}"
             ISSUE_TOKEN="${COMMON_ISSUE_TOKEN}"
+            ALERT_ROUTING="intended"
           else
             ISSUE_REPO="${GITHUB_REPOSITORY}"
             ISSUE_TOKEN="${GH_TOKEN}"
-            echo "::warning::The common issue token is unavailable; factory alerts will be filed in ${ISSUE_REPO}."
+            ALERT_ROUTING="fallback"
+            echo "::warning::Could not mint the ${INTENDED_ISSUE_REPO} issue token (app-token step: ${APP_TOKEN_OUTCOME}); factory alerts will be misrouted to ${ISSUE_REPO}. See the app-token step log for the API error."
+          fi
+          {
+            echo "alert_routing=${ALERT_ROUTING}"
+            echo "intended_issue_repo=${INTENDED_ISSUE_REPO}"
+            echo "fallback_issue_repo=${GITHUB_REPOSITORY}"
+          } >> "${GITHUB_OUTPUT}"
+
+          # A misrouted alert lands without the priority/p0, area/ci and
+          # kind/bug labels, because those labels only exist in the intended
+          # repo. Say so in the body so the issue is self-describing wherever
+          # it ends up.
+          misroute_banner=''
+          if [[ "${ALERT_ROUTING}" == "fallback" ]]; then
+            misroute_banner=$(cat <<EOF
+
+          > [!WARNING]
+          > **This alert was misrouted.** It belongs in \`${INTENDED_ISSUE_REPO}\`, but the
+          > MergeRaptor app token for that repo could not be minted, so it was filed here with
+          > the workflow's own repository-scoped token and without the usual alert labels.
+          > Tracking: projectbluefin/actions#556.
+          EOF
+            )
           fi
 
           monitor_pipeline() {
@@ -307,6 +339,7 @@ jobs:
             issue_title="${title_prefix} to ${rate_display} (24h window)"
             issue_body=$(cat <<EOF
           ## Factory success rate alert
+          ${misroute_banner}
 
           Monitoring window: last ${WINDOW_HOURS} hours
           Threshold: ${THRESHOLD}%
@@ -337,3 +370,38 @@ jobs:
           done < <(jq -c '.[] | select(.rate_value >= 0 and .rate_value < 80)' <<<"${results}")
 
           echo "Opened ${issues_opened} issue(s); closed ${issues_closed} recovered issue(s)."
+
+      # Runs last so the health summary above is always produced, then turns the
+      # degraded state into a red check. Without this the job concludes
+      # `success` while alerts pile up in the wrong repo, which is exactly how
+      # projectbluefin/actions#556 went unnoticed. Remediation is an app
+      # installation change, not a workflow change: grant the MergeRaptor App
+      # `Issues: write` on projectbluefin/common and approve the new permission
+      # on the installation. Until then every run of this workflow is red.
+      - name: Verify alert routing
+        if: always() && steps.monitor.outputs.alert_routing == 'fallback'
+        env:
+          INTENDED_ISSUE_REPO: ${{ steps.monitor.outputs.intended_issue_repo }}
+          FALLBACK_ISSUE_REPO: ${{ steps.monitor.outputs.fallback_issue_repo }}
+        run: |
+          set -euo pipefail
+
+          echo "::error title=Factory alerts are misrouted::Factory alerts were filed in ${FALLBACK_ISSUE_REPO} instead of ${INTENDED_ISSUE_REPO}, because the MergeRaptor app token could not be minted."
+          {
+            echo
+            echo "### :rotating_light: Alert routing degraded"
+            echo
+            echo "Factory alerts were filed in \`${FALLBACK_ISSUE_REPO}\` instead of \`${INTENDED_ISSUE_REPO}\`."
+            echo
+            echo "The health checks above still ran and are accurate. What failed is only the"
+            echo "destination for alerts: the \`Generate common issue token\` step could not mint a"
+            echo "token for \`${INTENDED_ISSUE_REPO}\`, so the workflow fell back to its own"
+            echo "repository-scoped token."
+            echo
+            echo "**Fix (maintainer, GitHub App settings — not a workflow change):** grant the"
+            echo "MergeRaptor App \`Issues: write\` on \`${INTENDED_ISSUE_REPO}\` and approve the"
+            echo "new permission on the installation. Then re-run this workflow; this step passes"
+            echo "once a token is minted."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          exit 1

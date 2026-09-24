@@ -224,6 +224,41 @@ health checks from running. If the cross-repo token is unavailable, use the work
 `github.token` to file alerts in `projectbluefin/actions`. This preserves monitoring and alerting while
 keeping the fallback credential unable to write outside its source repository.
 
+**`continue-on-error` on a token step must be paired with a step that fails the job.** This is the
+general rule, not a factory-health detail: `continue-on-error: true` keeps the *job* green, so a
+degraded run is indistinguishable from a healthy one in the checks UI. Report the degraded state as a
+step output, then fail on it in a later step that runs after the useful work is done:
+
+```yaml
+- name: Verify alert routing
+  if: always() && steps.monitor.outputs.alert_routing == 'fallback'
+  run: |
+    echo "::error title=...::..."
+    exit 1
+```
+
+A `::warning::` is not enough. Factory Health ran for months filing alerts into the wrong repository
+while every scheduled run concluded `success`; nobody noticed until a reviewer read a raw run log
+(projectbluefin/actions#556). Alerts that land in the fallback repo also arrive **unlabelled** —
+`priority/p0`, `area/ci` and `kind/bug` exist in `projectbluefin/common`, not here — so they carry a
+misroute banner in the body to stay self-describing wherever they end up.
+
+**Diagnosing "the common issue token is unavailable".** Two different failures produce an empty token
+and they have opposite remediations. Read the app-token step's own log before assuming either:
+
+| Symptom in the app-token step | Cause | Fix |
+|---|---|---|
+| `The 'client-id' (or deprecated 'app-id') input must be set to a non-empty string.` | credential not wired (see the `vars.*` gotcha below) | workflow change |
+| `422 The permissions requested are not granted to this installation.` | the App installation does not grant the requested permission on the target repo | **App installation change — no workflow change will fix it** |
+
+The 422 form is **not trigger-dependent**: it fails identically on `schedule` and on
+`workflow_dispatch`, because installation permissions are a property of the App, not of the event.
+Do not chase a schedule-versus-dispatch difference. The confirming cross-check is `factory-drift.yml`,
+which mints a token from the same App with `permission-contents: read` and succeeds — proving the
+credentials and the installation are fine and only the requested *permission* is missing. Remediate by
+granting the App that permission on the target repo and approving the new permission on the
+installation.
+
 **`MERGERAPTOR_APP_ID` is a `secrets.*` value, not a `vars.*` value** — see the approved-secrets
 table in `docs/skills/supply-chain.md`. Passing `vars.MERGERAPTOR_APP_ID` to
 `actions/create-github-app-token` silently resolves to an empty string (repo/org variables and
@@ -235,7 +270,8 @@ input, for consistency across workflows.
 ### Output
 
 The workflow always prints a markdown summary table to stdout and `$GITHUB_STEP_SUMMARY`, even when no
-issues are opened.
+issues are opened. When alerts were misrouted, the summary also carries an "Alert routing degraded"
+section naming the remediation, and the run concludes `failure`.
 
 ---
 
