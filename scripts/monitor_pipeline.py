@@ -13,6 +13,8 @@ Usage (from workflow):
         --workflow "Testing Images" \
         --threshold 80 \
         --window-hours 24 \
+        --min-runs 3 \
+        --min-consecutive-failures 2 \
         --output result.json
 
 The output JSON matches the shape written by monitor_pipeline() in the
@@ -20,7 +22,9 @@ original bash workflow:
     {
         "repo": "...", "pipeline": "...", "workflow": "...",
         "total": N, "success": N, "rate_value": N,
-        "rate_display": "N%" | "n/a", "status": "healthy"|"alert"|"no-runs",
+        "rate_display": "N%" | "n/a",
+        "status": "healthy"|"alert"|"low-sample"|"no-runs",
+        "consecutive_failures": N, "min_runs": N,
         "failures_md": "- [conclusion](url)\n..."
     }
 """
@@ -37,6 +41,8 @@ def compute_pipeline_health(
     runs: list[dict],
     cutoff_epoch: float,
     threshold: int = 80,
+    min_runs: int = 3,
+    min_consecutive_failures: int = 2,
 ) -> dict:
     """
     Given a list of workflow run dicts (from ``gh run list --json``),
@@ -55,11 +61,24 @@ def compute_pipeline_health(
         Unix timestamp; runs created before this are excluded.
     threshold:
         Success-rate threshold (0–100) below which status becomes "alert".
+    min_runs:
+        Minimum completed runs inside the window before a *rate* comparison
+        is trusted.  A once-a-day pipeline contributes a single run to a 24h
+        window, where the only representable rates are 100% and 0% — one
+        isolated failure reads as a total outage.  Below this floor the
+        status is "low-sample" instead of "alert".
+    min_consecutive_failures:
+        Escalation floor for under-sampled pipelines.  A low-volume pipeline
+        that is genuinely broken must still alert, so "low-sample" is
+        upgraded to "alert" once this many of the most recent completed runs
+        — taken from the whole fetched history, not just the window — failed
+        in a row.  Keeps the sample floor from becoming a blind spot.
 
     Returns
     -------
     dict with keys:
-        total, success, rate_value, rate_display, status, failures_md
+        total, success, rate_value, rate_display, status,
+        consecutive_failures, min_runs, failures_md
     """
     # Filter to the time window
     recent = [
@@ -80,14 +99,20 @@ def compute_pipeline_health(
 
     total = len(completed)
     success_count = sum(1 for r in completed if r.get("conclusion") == "success")
+    consecutive_failures = _consecutive_failures(runs)
 
     if total > 0:
         rate_value = (success_count * 100) // total
         rate_display = f"{rate_value}%"
-        if rate_value < threshold:
+        if rate_value >= threshold:
+            status = "healthy"
+        elif total >= min_runs:
+            status = "alert"
+        elif consecutive_failures >= min_consecutive_failures:
+            # Under-sampled, but failing run after run — a real outage.
             status = "alert"
         else:
-            status = "healthy"
+            status = "low-sample"
     else:
         rate_value = -1
         rate_display = "n/a"
@@ -107,6 +132,8 @@ def compute_pipeline_health(
         "rate_value": rate_value,
         "rate_display": rate_display,
         "status": status,
+        "consecutive_failures": consecutive_failures,
+        "min_runs": min_runs,
         "failures_md": failures_md,
     }
 
@@ -122,15 +149,44 @@ def should_open_issue(
     An issue is suppressed when:
     - The pipeline is healthy (rate_value >= threshold → status != "alert")
     - rate_value is -1 (no-runs window — no data to alert on)
+    - The window is under-sampled (status "low-sample" — too few completed
+      runs for the rate to mean anything, and not failing back-to-back)
     - An open issue with matching title prefix already exists
     """
     if health["rate_value"] < 0 or health["status"] != "alert":
         return False
     for issue in existing_issues:
         if issue.get("title", "").startswith(title_prefix):
-            return True if False else False  # existing → don't open again
+            return False  # existing → don't open again
     # No duplicate found → should open
     return True
+
+
+def _consecutive_failures(runs: list[dict]) -> int:
+    """
+    Count how many of the most recent completed runs failed back-to-back.
+
+    Deliberately reads the *whole* fetched history rather than the monitoring
+    window: a once-a-day pipeline only ever has one run inside a 24h window,
+    so the window alone cannot distinguish a one-off flake from a pipeline
+    that has been failing every night.  ``gh run list`` already returns
+    newest-first, but sort explicitly so the count never depends on that.
+    """
+    completed = sorted(
+        (
+            r for r in runs
+            if r.get("status") == "completed"
+            and r.get("conclusion") in ("success", "failure")
+        ),
+        key=lambda r: _parse_epoch(r.get("createdAt", "")),
+        reverse=True,
+    )
+    streak = 0
+    for run in completed:
+        if run.get("conclusion") == "success":
+            break
+        streak += 1
+    return streak
 
 
 def _parse_epoch(ts: str) -> float:
@@ -154,16 +210,19 @@ def aggregate_health(results: list[dict]) -> dict:
     Returns
     -------
     dict with keys:
-        total_pipelines, healthy_count, alert_count, no_runs_count
+        total_pipelines, healthy_count, alert_count, no_runs_count,
+        low_sample_count
     """
     healthy = sum(1 for r in results if r.get("status") == "healthy")
     alert = sum(1 for r in results if r.get("status") == "alert")
     no_runs = sum(1 for r in results if r.get("status") == "no-runs")
+    low_sample = sum(1 for r in results if r.get("status") == "low-sample")
     return {
         "total_pipelines": len(results),
         "healthy_count": healthy,
         "alert_count": alert,
         "no_runs_count": no_runs,
+        "low_sample_count": low_sample,
     }
 
 
@@ -175,6 +234,18 @@ def main() -> int:  # pragma: no cover
     ap.add_argument("--workflow", required=True)
     ap.add_argument("--threshold", type=int, default=80)
     ap.add_argument("--window-hours", type=int, default=24)
+    ap.add_argument(
+        "--min-runs",
+        type=int,
+        default=3,
+        help="Minimum completed runs in the window before a rate alert fires",
+    )
+    ap.add_argument(
+        "--min-consecutive-failures",
+        type=int,
+        default=2,
+        help="Back-to-back failures that escalate an under-sampled pipeline",
+    )
     ap.add_argument("--output", required=True, help="Output JSON path")
     args = ap.parse_args()
 
@@ -187,7 +258,13 @@ def main() -> int:  # pragma: no cover
     with open(args.runs_json) as f:
         runs = json.load(f)
 
-    health = compute_pipeline_health(runs, cutoff, args.threshold)
+    health = compute_pipeline_health(
+        runs,
+        cutoff,
+        args.threshold,
+        min_runs=args.min_runs,
+        min_consecutive_failures=args.min_consecutive_failures,
+    )
     result = {
         "repo": args.repo,
         "pipeline": args.pipeline,

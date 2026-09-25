@@ -94,6 +94,18 @@ on:
         required: false
         type: boolean
         default: true
+      auto_merge:
+        description: >
+          Whether anything ever merges the promotion PR without a human. This is
+          the repository's merge policy, not this run's state: leave it true
+          wherever a release window eventually enrolls the PR (bluefin,
+          bluefin-lts, dakota) and set it false where a person merges the PR from
+          the UI (finpilot, which also pins enqueue_promotion to false). Only the
+          rendered PR body reads it; enrollment is still decided by
+          enqueue_promotion.
+        required: false
+        type: boolean
+        default: true
       request_reviewer:
         description: >
           Request a reviewer for the promotion PR. When true and reviewer is empty,
@@ -375,6 +387,12 @@ jobs:
           echo "commits_json=${COMMITS_JSON}" >> "$GITHUB_OUTPUT"
           echo "compare_url=https://github.com/${{ github.repository }}/compare/${TARGET_BRANCH}...${SOURCE_BRANCH}" >> "$GITHUB_OUTPUT"
 
+      # auto_merge, not enqueue_promotion: the body states how this PR gets
+      # merged at all, and this step reruns on every refresh event. In the
+      # bluefin model enqueue_promotion is false on every push and every
+      # non-Tuesday run, so forwarding it would replace the auto-merge notice
+      # with "merged by a human" for the whole week between release windows —
+      # exactly when the do-not-merge instruction is the actionable one.
       - name: Render promotion PR body
         if: steps.compare.outputs.sync_needed == 'true' && steps.rebuild.outputs.promoted != 'false'
         id: render
@@ -392,6 +410,7 @@ jobs:
           commits_json:      ${{ steps.gitlog.outputs.commits_json }}
           compare_url:       ${{ steps.gitlog.outputs.compare_url }}
           e2e_image:         ${{ inputs.e2e_image }}
+          auto_merge:        ${{ inputs.auto_merge }}
           output:            ${{ runner.temp }}/promotion-pr-body.md
 
       - name: Upsert promotion PR

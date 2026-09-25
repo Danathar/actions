@@ -45,6 +45,16 @@ jobs:
 
           WINDOW_HOURS=24
           THRESHOLD=80
+          # Minimum completed runs inside the window before the rate is
+          # trusted. A once-a-day pipeline (Nightly E2E) contributes one run
+          # to a 24h window, where the only representable rates are 100% and
+          # 0% — a single flake reads as a total outage and files a P0
+          # (projectbluefin/actions#479, #555). Below the floor: "low-sample".
+          MIN_RUNS=3
+          # Escalation floor so the sample floor is not a blind spot: an
+          # under-sampled pipeline still alerts once this many of its most
+          # recent completed runs failed back-to-back.
+          MIN_CONSECUTIVE_FAILURES=2
           CUTOFF_EPOCH=$(date -u -d "${WINDOW_HOURS} hours ago" '+%s')
           # Same instant as CUTOFF_EPOCH, in the form `gh run list --created`
           # accepts, so the fetch is bounded by the window the rate is computed
@@ -103,6 +113,7 @@ jobs:
             local workflow="$3"
 
             local runs_json fetched recent_json completed_json total success rate_display rate_value status failures_md
+            local consecutive_failures
 
             # `--created` filters server-side, so the fetch budget is spent on
             # runs inside the window instead of on history that the cutoff
@@ -149,13 +160,34 @@ jobs:
             total=$(jq 'length' <<<"${completed_json}")
             success=$(jq '[ .[] | select(.conclusion == "success") ] | length' <<<"${completed_json}")
 
+            # Back-to-back failures on the most recent completed runs, read from
+            # the whole fetched history rather than the window: a once-a-day
+            # pipeline has one run in a 24h window, so the window alone cannot
+            # tell a one-off flake from a pipeline failing every night.
+            # index("success") is the count of leading failures; null (never
+            # succeeded in the fetched history) falls back to the run count.
+            consecutive_failures=$(jq '
+              [ .[]
+              | select(.status == "completed" and (.conclusion == "success" or .conclusion == "failure"))
+              ]
+              | sort_by(.createdAt)
+              | reverse
+              | map(.conclusion)
+              | (index("success") // length)
+            ' <<<"${runs_json}")
+
             if (( total > 0 )); then
               rate_value=$(( success * 100 / total ))
               rate_display="${rate_value}%"
-              if (( rate_value < THRESHOLD )); then
+              if (( rate_value >= THRESHOLD )); then
+                status="healthy"
+              elif (( total >= MIN_RUNS )); then
+                status="alert"
+              elif (( consecutive_failures >= MIN_CONSECUTIVE_FAILURES )); then
+                # Under-sampled, but failing run after run — a real outage.
                 status="alert"
               else
-                status="healthy"
+                status="low-sample"
               fi
             else
               rate_value=-1
@@ -180,6 +212,8 @@ jobs:
               --argjson rate_value "${rate_value}" \
               --arg rate_display "${rate_display}" \
               --arg status "${status}" \
+              --argjson consecutive_failures "${consecutive_failures}" \
+              --argjson min_runs "${MIN_RUNS}" \
               --arg failures_md "${failures_md}" \
               '{
                 repo: $repo,
@@ -190,6 +224,8 @@ jobs:
                 rate_value: $rate_value,
                 rate_display: $rate_display,
                 status: $status,
+                consecutive_failures: $consecutive_failures,
+                min_runs: $min_runs,
                 failures_md: $failures_md
               }'
           }
@@ -328,6 +364,7 @@ jobs:
             rate_display=$(jq -r '.rate_display' <<<"${breach}")
             success=$(jq -r '.success' <<<"${breach}")
             total=$(jq -r '.total' <<<"${breach}")
+            consecutive_failures=$(jq -r '.consecutive_failures' <<<"${breach}")
             failures_md=$(jq -r '.failures_md' <<<"${breach}")
 
             title_prefix="fix(factory): [${repo}] [${pipeline}] success rate dropped"
@@ -352,6 +389,8 @@ jobs:
 
           Monitoring window: last ${WINDOW_HOURS} hours
           Threshold: ${THRESHOLD}%
+          Minimum sample for a rate alert: ${MIN_RUNS} completed runs
+          (below that, ${MIN_CONSECUTIVE_FAILURES} back-to-back failures)
 
           ### Current pipeline rates
           ${summary_table}
@@ -361,6 +400,7 @@ jobs:
           - Pipeline: ${pipeline}
           - Workflow: ${workflow}
           - Success rate: ${rate_display} (${success}/${total})
+          - Consecutive failures on the most recent completed runs: ${consecutive_failures}
 
           ### Failing runs
           ${failures_md}
@@ -376,7 +416,12 @@ jobs:
               "${label_args[@]}"
 
             issues_opened=$((issues_opened + 1))
-          done < <(jq -c '.[] | select(.rate_value >= 0 and .rate_value < 80)' <<<"${results}")
+          done < <(jq -c '.[] | select(.status == "alert")' <<<"${results}")
+
+          low_sample=$(jq -r '[ .[] | select(.status == "low-sample") ] | length' <<<"${results}")
+          if (( low_sample > 0 )); then
+            echo "::notice::${low_sample} pipeline(s) are below the ${MIN_RUNS}-run sample floor; reported as low-sample instead of alert."
+          fi
 
           echo "Opened ${issues_opened} issue(s); closed ${issues_closed} recovered issue(s)."
 

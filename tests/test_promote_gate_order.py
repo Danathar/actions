@@ -11,8 +11,25 @@ WORKFLOW = (
 )
 
 
+def _workflow():
+    return yaml.safe_load(WORKFLOW.read_text())
+
+
 def _jobs():
-    return yaml.safe_load(WORKFLOW.read_text())["jobs"]
+    return _workflow()["jobs"]
+
+
+def _call_inputs():
+    document = _workflow()
+    # YAML 1.1 resolves the bare `on` key to True, which is what PyYAML hands back.
+    triggers = document.get("on", document.get(True))
+    return triggers["workflow_call"]["inputs"]
+
+
+def _render_step():
+    return next(
+        step for step in _jobs()["promote"]["steps"] if step.get("id") == "render"
+    )
 
 
 def test_queue_enrollment_runs_only_after_release_gate_succeeds():
@@ -71,6 +88,21 @@ def test_explicit_gate_failure_opens_actionable_issue():
     assert "needs.gate.result == 'failure'" in jobs["report-gate-failure"]["if"]
     script = jobs["report-gate-failure"]["steps"][0]["with"]["script"]
     assert "priority/p1" in script
+
+
+def test_auto_merge_defaults_to_todays_rendered_body():
+    auto_merge = _call_inputs()["auto_merge"]
+    assert auto_merge["type"] == "boolean"
+    assert auto_merge["default"] is True
+
+
+def test_pr_body_merge_note_is_policy_not_release_window_state():
+    # enqueue_promotion is false on every refresh event in the bluefin model, so
+    # forwarding it here would advertise "merged by a human" for the whole week
+    # between release windows. The body describes the repository's merge policy.
+    forwarded = _render_step()["with"]["auto_merge"]
+    assert forwarded == "${{ inputs.auto_merge }}"
+    assert "enqueue_promotion" not in forwarded
 
 
 def test_e2e_status_context_is_forwarded_to_release_gate():

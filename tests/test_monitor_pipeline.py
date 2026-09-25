@@ -2,8 +2,9 @@
 Tests for scripts/monitor_pipeline.py — factory health computation core.
 
 Covers: time-window filtering, success rate calculation, threshold boundary,
-alert vs healthy status, issue deduplication, markdown failure links,
-no-runs edge case, and aggregate_health summary.
+alert vs healthy status, the minimum-sample floor and its consecutive-failure
+escalation, issue deduplication, markdown failure links, no-runs edge case,
+and aggregate_health summary.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from monitor_pipeline import (
     compute_pipeline_health,
     should_open_issue,
     aggregate_health,
+    _consecutive_failures,
     _parse_epoch,
 )
 
@@ -192,6 +194,120 @@ class TestComputePipelineHealth:
         assert result["failures_md"] == ""
 
 
+# ── minimum-sample floor ──────────────────────────────────────────────────────
+
+class TestMinimumSampleFloor:
+    """
+    A once-a-day pipeline puts exactly one run in a 24h window, so the only
+    rates it can report are 100% and 0%. Without a sample floor, one flake
+    files a P0 (projectbluefin/actions#479).
+    """
+
+    def test_single_failed_run_is_low_sample_not_alert(self):
+        # The #479 shape: Nightly E2E, 0/1 in the window, nothing before it.
+        runs = [_make_run("failure", minutes_ago=30)]
+        result = compute_pipeline_health(runs, CUTOFF_1H_AGO, threshold=80)
+        assert result["total"] == 1
+        assert result["rate_value"] == 0
+        assert result["status"] == "low-sample"
+
+    def test_low_sample_does_not_open_an_issue(self):
+        runs = [_make_run("failure", minutes_ago=30)]
+        result = compute_pipeline_health(runs, CUTOFF_1H_AGO, threshold=80)
+        assert not should_open_issue(result, [], "fix(factory): [org/repo]")
+
+    def test_sample_at_the_floor_still_alerts(self):
+        # 3 completed runs (the default floor), 1 success → 33% → alert
+        runs = [_make_run("failure", minutes_ago=30) for _ in range(2)]
+        runs.append(_make_run("success", minutes_ago=30))
+        result = compute_pipeline_health(runs, CUTOFF_1H_AGO, threshold=80)
+        assert result["total"] == 3
+        assert result["status"] == "alert"
+
+    def test_floor_never_suppresses_a_healthy_pipeline(self):
+        runs = [_make_run("success", minutes_ago=30)]
+        result = compute_pipeline_health(runs, CUTOFF_1H_AGO, threshold=80)
+        assert result["status"] == "healthy"
+
+    def test_consecutive_failures_escalate_an_under_sampled_pipeline(self):
+        # One failure in the window, but the night before failed too — the
+        # floor must not become a blind spot for a pipeline that is down.
+        runs = [
+            _make_run("failure", minutes_ago=30),
+            _make_run("failure", minutes_ago=24 * 60 + 30),  # outside the window
+        ]
+        result = compute_pipeline_health(runs, CUTOFF_1H_AGO, threshold=80)
+        assert result["total"] == 1
+        assert result["consecutive_failures"] == 2
+        assert result["status"] == "alert"
+
+    def test_recent_success_breaks_the_failure_streak(self):
+        runs = [
+            _make_run("failure", minutes_ago=30),
+            _make_run("success", minutes_ago=24 * 60 + 30),
+            _make_run("failure", minutes_ago=48 * 60 + 30),
+        ]
+        result = compute_pipeline_health(runs, CUTOFF_1H_AGO, threshold=80)
+        assert result["consecutive_failures"] == 1
+        assert result["status"] == "low-sample"
+
+    def test_min_runs_is_configurable(self):
+        runs = [_make_run("failure", minutes_ago=30) for _ in range(4)]
+        result = compute_pipeline_health(
+            runs, CUTOFF_1H_AGO, threshold=80, min_runs=5,
+            min_consecutive_failures=99,
+        )
+        assert result["status"] == "low-sample"
+
+    def test_no_runs_still_reports_no_runs(self):
+        result = compute_pipeline_health([], CUTOFF_1H_AGO, threshold=80)
+        assert result["status"] == "no-runs"
+
+    def test_min_runs_is_reported_on_the_result(self):
+        runs = [_make_run("success", minutes_ago=30)]
+        result = compute_pipeline_health(runs, CUTOFF_1H_AGO, min_runs=7)
+        assert result["min_runs"] == 7
+
+
+# ── _consecutive_failures ─────────────────────────────────────────────────────
+
+class TestConsecutiveFailures:
+    def test_empty_history_is_zero(self):
+        assert _consecutive_failures([]) == 0
+
+    def test_counts_only_the_leading_streak(self):
+        runs = [
+            _make_run("failure", minutes_ago=10),
+            _make_run("failure", minutes_ago=20),
+            _make_run("success", minutes_ago=30),
+            _make_run("failure", minutes_ago=40),
+        ]
+        assert _consecutive_failures(runs) == 2
+
+    def test_never_succeeded_counts_whole_history(self):
+        runs = [_make_run("failure", minutes_ago=10 * i) for i in range(1, 5)]
+        assert _consecutive_failures(runs) == 4
+
+    def test_ordering_is_derived_from_timestamps_not_list_order(self):
+        # Oldest-first input must yield the same answer as newest-first.
+        runs = [
+            _make_run("success", minutes_ago=40),
+            _make_run("failure", minutes_ago=20),
+            _make_run("failure", minutes_ago=10),
+        ]
+        assert _consecutive_failures(runs) == 2
+
+    def test_cancelled_and_in_progress_runs_do_not_break_the_streak(self):
+        runs = [
+            _make_run("failure", minutes_ago=10),
+            _make_run("cancelled", minutes_ago=20),
+            _make_run(conclusion="", status="in_progress", minutes_ago=25),
+            _make_run("failure", minutes_ago=30),
+            _make_run("success", minutes_ago=40),
+        ]
+        assert _consecutive_failures(runs) == 2
+
+
 # ── should_open_issue ─────────────────────────────────────────────────────────
 
 class TestShouldOpenIssue:
@@ -210,6 +326,10 @@ class TestShouldOpenIssue:
     def test_suppresses_issue_when_no_runs(self):
         no_runs = {"rate_value": -1, "status": "no-runs"}
         assert not should_open_issue(no_runs, [], "fix(factory): [org/repo]")
+
+    def test_suppresses_issue_when_low_sample(self):
+        low_sample = {"rate_value": 0, "status": "low-sample"}
+        assert not should_open_issue(low_sample, [], "fix(factory): [org/repo]")
 
     def test_suppresses_duplicate_when_open_issue_exists(self):
         existing = [{"title": "fix(factory): [org/repo] rate dropped to 50% (24h window)"}]
@@ -236,12 +356,14 @@ class TestAggregateHealth:
             {"status": "alert"},
             {"status": "alert"},
             {"status": "no-runs"},
+            {"status": "low-sample"},
         ]
         agg = aggregate_health(results)
-        assert agg["total_pipelines"] == 4
+        assert agg["total_pipelines"] == 5
         assert agg["healthy_count"] == 1
         assert agg["alert_count"] == 2
         assert agg["no_runs_count"] == 1
+        assert agg["low_sample_count"] == 1
 
     def test_empty_results(self):
         agg = aggregate_health([])
