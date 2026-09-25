@@ -61,6 +61,7 @@ Agent entry point for `projectbluefin/actions`. Load only the skill relevant to 
 | Vendor or hash-verify an external build file | `docs/skills/supply-chain.md` → "vendor external build instruction files" |
 | Understand or configure the production gate (2-human approval) | `docs/skills/factory-operations.md` → "Production Gate" |
 | Monitor factory success rates or configure scheduled health alerts | `docs/skills/factory-operations.md` → "Factory Health Monitor" |
+| Tune the factory-health alert threshold, sample floor, or failure streak | `docs/skills/factory-operations.md` → "A rate needs a sample — the 0/1 trap" |
 | Debug a stuck or missing Environment approval gate | `docs/skills/factory-operations.md` → "Troubleshooting" |
 | Understand dakota-specific action adoption | `docs/skills/consumer-guide/upgrade-and-migration.md` → "Dakota" |
 | Wire migration testing across registries | `docs/skills/consumer-guide/upgrade-and-migration.md` → "Migration test" |

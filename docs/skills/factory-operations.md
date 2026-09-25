@@ -177,9 +177,50 @@ falls below the success-rate threshold.
 - Success rate = `successful completed runs / completed non-skipped runs`
 - Window = last 24 hours
 - Threshold = 80%
+- Minimum sample = 3 completed runs in the window (`MIN_RUNS`)
+- Escalation floor = 2 back-to-back failures (`MIN_CONSECUTIVE_FAILURES`)
 - Open issues are deduplicated by repo + pipeline title prefix
 - Issues are filed in `projectbluefin/common` with the labels that currently exist from:
   `priority/p0`, `area/ci`, `kind/bug`
+
+Each pipeline lands in one of four statuses. Only `alert` files an issue:
+
+| Status | Meaning |
+|---|---|
+| `healthy` | rate ≥ threshold |
+| `alert` | rate < threshold on a trusted sample, **or** an under-sampled pipeline failing back-to-back |
+| `low-sample` | rate < threshold but fewer than `MIN_RUNS` completed runs in the window, and not failing back-to-back |
+| `no-runs` | nothing completed inside the window |
+
+### A rate needs a sample — the 0/1 trap
+
+**A threshold is meaningless on a sample of one.** `Nightly E2E` runs once a day, so a 24h window
+holds exactly one completed run and the only rates it can report are 100% and 0%. One flaky night
+put the pipeline at `0/1` and filed a `priority/p0` issue that a maintainer closed as "transient"
+([actions#479](https://github.com/projectbluefin/actions/issues/479),
+[actions#555](https://github.com/projectbluefin/actions/issues/555)). The same shape bites any
+low-volume pipeline, and it got worse — not better — when [#528](https://github.com/projectbluefin/actions/pull/528)
+correctly narrowed the sample by excluding pre-merge runs. The `no-runs` branch only ever caught
+`n=0`, never `n=1`.
+
+Below `MIN_RUNS` the monitor reports `low-sample` and does not file an issue.
+
+**But a sample floor is a mute button, so it needs an escape hatch.** A nightly that fails *every*
+night would stay at `n=1` forever and never alert. So `low-sample` escalates to `alert` once the
+most recent `MIN_CONSECUTIVE_FAILURES` completed runs failed in a row. That streak is counted over
+the **whole fetched run history, not the window** — the window is exactly the thing that is too
+small to tell a flake from an outage. A once-a-day pipeline that is genuinely down therefore alerts
+on its second consecutive failure, roughly 24h later, instead of on the first flake.
+
+**Keep the two copies in lockstep.** The shipped logic is inline bash in `factory-health.yml`;
+`scripts/monitor_pipeline.py` mirrors it in Python for unit testing and is *not* invoked by the
+workflow. Editing one without the other silently makes the tests describe code that never runs.
+Coverage for both:
+
+| Copy | Tests |
+|---|---|
+| `factory-health.yml` (shipped) | `tests/bats/test_factory_health_status.bats` — captures the run block verbatim |
+| `scripts/monitor_pipeline.py` (mirror) | `tests/test_monitor_pipeline.py` |
 
 ### Bound the run fetch by the window, not by a run count
 
@@ -655,6 +696,9 @@ instead of attempting a merge. This is safe because:
 ```
 Factory health monitor runs every 6 hours
   └─▶ success rate < 80%
+        ├── fewer than 3 completed runs in the window
+        │     ├── 2+ back-to-back failures → treated as an alert
+        │     └── otherwise → reported as low-sample, no issue
         ├── no open alert issue → opens issue in projectbluefin/common
         └── open alert issue exists → logs and skips duplicate creation
 

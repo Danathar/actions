@@ -51,6 +51,7 @@ Coverage gate: `--cov-fail-under=75`
 | `sign-and-publish` keyless/key validation + SBOM attach/cache/path guards | `tests/bats/test_sign_and_publish.bats` (19 tests) |
 | `setup-runner` native-overlay setup & podman source selection | `tests/bats/test_setup_runner.bats` (16 tests) |
 | `chunka` config temp-file creation + `fs.protected_regular` drift guard | `tests/bats/test_chunka.bats` (4 tests) |
+| `factory-health.yml` pipeline status classification (threshold, sample floor, failure streak) | `tests/bats/test_factory_health_status.bats` (12 tests), kept in sync with the workflow by `tests/test_factory_health_classify_sync.py` |
 | `reusable-renovate-automerge.yml` check-rollup classification | `tests/bats/test_renovate_automerge_checks.bats` (8 tests) |
 | `reusable-renovate-automerge.yml` PR-lookup / qualification matcher | `tests/bats/test_renovate_automerge_find_pr.bats` (10 tests) |
 | `renovate-automerge-wiring.yml` wiring assertion (`scripts/renovate-automerge-wiring-check.sh`) | `tests/bats/test_renovate_automerge_wiring_check.bats` (10 tests) |
@@ -171,6 +172,17 @@ corresponding standalone script file. The canonical approach:
 
 1. **Capture the snippet verbatim** in a bats variable — this serves as a change detector:
    any edit to the action that alters testable behavior must update the test.
+
+   "Verbatim" is a claim the repo must be able to check. A copy guarded only by a comment
+   drifts silently: the bats file keeps passing against the old rules while the action or
+   workflow moves on. Fence the copy with begin/end markers and add a companion test that
+   parses the source and asserts the two agree — `tests/test_factory_health_classify_sync.py`
+   does this for `tests/bats/test_factory_health_status.bats`, comparing the dedented block
+   against `monitor_pipeline()` in `factory-health.yml` and cross-checking the thresholds the
+   bats `setup()` exports. Put that companion test in **pytest**, not bats, and make sure
+   `unit-tests.yml` lists the source file in its `paths` filter, so editing the source alone
+   is enough to run it. `scripts/renovate-automerge-wiring-check.sh` is the same idea applied
+   to repository settings.
 
 ```bash
 # In the bats file, at the top:
