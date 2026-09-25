@@ -249,6 +249,7 @@ Rules:
 - Emit that warning on **stderr**. `monitor_pipeline()` writes its result JSON to stdout and the
   caller captures it; a workflow command on stdout would corrupt the captured JSON. The runner
   parses `::warning::` from both streams, so `>&2` costs nothing.
+
 ### Alert lifecycle - alerts must close themselves
 
 Deduplication and closing are two halves of one mechanism. The dedupe check matches an open
